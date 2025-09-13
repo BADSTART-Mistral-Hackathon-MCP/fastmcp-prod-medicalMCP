@@ -65,7 +65,6 @@ mcp = FastMCP(
         "Read-only & parameterized access to Google BigQuery (safe by design).\n"
         "Datasets/tables par défaut: prod_public.(hospital|surgeons|patients|cases|lab_results)\n"
         "Tools:\n"
-        "  - echo_tool(text)                                # Echo the input text\n"
         "  - list_datasets()                                # List all available BigQuery datasets\n"
         "  - list_tables(dataset)                           # List all tables in a dataset\n"
         "  - get_table_schema(dataset, table)              # Get schema of a table (legacy)\n"
@@ -297,11 +296,6 @@ def _detect_specialties_shape(dataset: str, table: str) -> Tuple[Optional[str], 
     return ("specialties", "scalar_string", None)
 
 # ============= Tools Legacy (pour compatibilité) =============
-
-@mcp.tool()
-def echo_tool(text: str) -> str:
-    """Echo the input text"""
-    return text
 
 @mcp.tool()
 def list_datasets() -> List[str]:
@@ -1015,21 +1009,6 @@ def bq_datasets_resource() -> str:
     """Resource to list BigQuery datasets"""
     datasets = list_datasets()
     return f"Available datasets: {', '.join(datasets)}"
-
-@mcp.resource("echo://static")
-def echo_resource() -> str:
-    return "Echo!"
-
-@mcp.resource("echo://{text}")
-def echo_template(text: str) -> str:
-    """Echo the input text"""
-    return f"Echo: {text}"
-
-# ============= Prompts =============
-
-@mcp.prompt("echo")
-def echo_prompt(text: str) -> str:
-    return text
 
 if __name__ == "__main__":
     mcp.run()
