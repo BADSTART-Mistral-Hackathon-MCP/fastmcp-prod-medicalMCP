@@ -4,7 +4,7 @@ FastMCP Echo Server with BigQuery Integration
 
 import os
 from fastmcp import FastMCP
-from typing import List
+from typing import List, Dict, Any
 from google.cloud import bigquery
 from google.oauth2 import service_account
 
@@ -27,7 +27,7 @@ SERVICE_ACCOUNT_INFO = {
 }
 
 # Create server
-mcp = FastMCP("Echo Server with BigQuery")
+mcp = FastMCP("Medical MCP BigQuery Server")
 
 # Client BigQuery global
 _client = None
@@ -45,20 +45,89 @@ def bq_client() -> bigquery.Client:
             _client = bigquery.Client(project=PROJECT_ID)
     return _client
 
-@mcp.tool
+@mcp.tool()
 def echo_tool(text: str) -> str:
     """Echo the input text"""
     return text
 
-@mcp.tool
+@mcp.tool()
 def list_datasets() -> List[str]:
     """List all available BigQuery datasets in the project"""
     try:
         client = bq_client()
         datasets = sorted(ds.dataset_id for ds in client.list_datasets())
-        return datasets
+        return datasets if datasets else ["No datasets found"]
     except Exception as e:
         return [f"Error: {str(e)}"]
+
+@mcp.tool()
+def list_tables(dataset: str = "prod_public") -> List[str]:
+    """List all tables in a BigQuery dataset"""
+    try:
+        client = bq_client()
+        dataset_ref = client.dataset(dataset)
+        tables = [table.table_id for table in client.list_tables(dataset_ref)]
+        return sorted(tables) if tables else ["No tables found"]
+    except Exception as e:
+        return [f"Error: {str(e)}"]
+
+@mcp.tool()
+def get_table_schema(dataset: str = "prod_public", table: str = "hospital") -> List[Dict[str, str]]:
+    """Get the schema of a BigQuery table"""
+    try:
+        client = bq_client()
+        table_ref = client.dataset(dataset).table(table)
+        table_obj = client.get_table(table_ref)
+        schema = []
+        for field in table_obj.schema:
+            schema.append({
+                "name": field.name,
+                "type": field.field_type,
+                "mode": field.mode or "NULLABLE"
+            })
+        return schema
+    except Exception as e:
+        return [{"error": str(e)}]
+
+@mcp.tool()
+def query_hospitals(limit: int = 10) -> List[Dict[str, Any]]:
+    """Query hospital data from BigQuery"""
+    try:
+        client = bq_client()
+        query = f"""
+        SELECT hospital_id, hospital_name, city, primary_specialty, capacity_beds
+        FROM `{PROJECT_ID}.prod_public.hospital`
+        WHERE hospital_name IS NOT NULL
+        ORDER BY hospital_name
+        LIMIT {limit}
+        """
+        results = client.query(query).result()
+        return [dict(row) for row in results]
+    except Exception as e:
+        return [{"error": str(e)}]
+
+@mcp.tool()
+def search_hospitals_by_city(city: str, limit: int = 10) -> List[Dict[str, Any]]:
+    """Search hospitals by city name"""
+    try:
+        client = bq_client()
+        query = f"""
+        SELECT hospital_id, hospital_name, city, primary_specialty, capacity_beds
+        FROM `{PROJECT_ID}.prod_public.hospital`
+        WHERE LOWER(city) LIKE LOWER('%{city}%')
+        ORDER BY hospital_name
+        LIMIT {limit}
+        """
+        results = client.query(query).result()
+        return [dict(row) for row in results]
+    except Exception as e:
+        return [{"error": str(e)}]
+
+@mcp.resource("bq://datasets")
+def bq_datasets_resource() -> str:
+    """Resource to list BigQuery datasets"""
+    datasets = list_datasets()
+    return f"Available datasets: {', '.join(datasets)}"
 
 @mcp.resource("echo://static")
 def echo_resource() -> str:
