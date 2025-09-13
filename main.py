@@ -1,34 +1,17 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """
-Unified MCP Server - BigQuery + Google Calendar Integration
-Combines BigQuery data access and Calendar management in a single service
+FastMCP Echo Server with Advanced BigQuery Integration
 """
 
 import os
 import re
 from functools import lru_cache
 from typing import Any, Dict, List, Optional, Tuple
-from datetime import datetime, date, time, timedelta
-
 from fastmcp import FastMCP
-from pydantic import Field
 from google.cloud import bigquery
 from google.cloud.bigquery import QueryJobConfig
 from google.oauth2 import service_account
-from google.oauth2.credentials import Credentials
-from googleapiclient.discovery import build
-from dateutil import parser as dtp
-from dateutil import tz
 
-# ============= Configuration unifiée =============
-
-# Server runtime config
-PORT = int(os.getenv("PORT", "3000"))
-DEBUG = os.getenv("DEBUG", "true").lower() in {"1", "true", "yes"}
-STATELESS = True  # Pour FastMCP Cloud
-
-# BigQuery Configuration
+# Configuration du projet
 PROJECT_ID = "mcp-hackathon-mistral"
 LOCATION = os.getenv("BQ_LOCATION", "EU")
 
@@ -36,11 +19,11 @@ LOCATION = os.getenv("BQ_LOCATION", "EU")
 _ALLOWED = [d.strip() for d in os.getenv("ALLOWED_DATASETS", "").split(",") if d.strip()]
 ALLOWED_DATASETS = set(_ALLOWED) if _ALLOWED else set()
 
-# Limites BigQuery
+# Limites
 MAX_BYTES_BILLED = int(os.getenv("MAX_BYTES_BILLED", "200000000"))
 MAX_ROWS = int(os.getenv("MAX_ROWS", "1000"))
 
-# Défauts BigQuery
+# Défauts
 DEFAULT_DATASET = "prod_public"
 
 HOSPITALS_DATASET = os.getenv("HOSPITALS_DATASET", DEFAULT_DATASET).strip()
@@ -60,14 +43,8 @@ CASES_TABLE = os.getenv("CASES_TABLE", "cases").strip()
 LABS_DATASET = os.getenv("LABS_DATASET", DEFAULT_DATASET).strip()
 LABS_TABLE = os.getenv("LABS_TABLE", "lab_results").strip()
 
-# Calendar Configuration
-TIMEZONE = os.getenv("TIMEZONE", "Europe/Paris")
-DEFAULT_SCOPES = ["https://www.googleapis.com/auth/calendar"]
-SCOPES: List[str] = DEFAULT_SCOPES
-TOKEN_PATH = os.getenv("GOOGLE_TOKEN_PATH", "token.json")
-
-# BigQuery Service Account Credentials
-BQ_SERVICE_ACCOUNT_INFO = {
+# Credentials - hardcodés pour le test (À SÉCURISER EN PRODUCTION!)
+SERVICE_ACCOUNT_INFO = {
     "type": "service_account",
     "project_id": "mcp-hackathon-mistral",
     "private_key_id": "b2b3d966d5b3bd579c901e6be63b0d13212a2e14",
@@ -81,88 +58,58 @@ BQ_SERVICE_ACCOUNT_INFO = {
     "universe_domain": "googleapis.com"
 }
 
-# Calendar OAuth Credentials
-CALENDAR_CREDENTIALS_INFO: Dict[str, Any] = {
-    "token": "ya29.a0AS3H6NximJxBnDooAP0WgYdQrIb7V5HcCfLIcuOoJSbUyeUjoNU3aAhcC3Dk1ymEzPDlCFIkC2NdwV2iZ9zPu3fTWYEWoDzLlH7o675l4Vm6HyqygWuUNVG_WjKDY6dAA6o3zffGS0jwcvqAu3nx2d5FaqWAv9leZ63R6hEb4Hklw41P9ryYRVF3HD-t9dPXdr74uPQaCgYKAWsSARISFQHGX2Mi9aVrMIHs8AYEdVfcAvgH_A0206",
-    "refresh_token": "1//03mnS08DmW66GCgYIARAAGAMSNwF-L9Irf5TMBKCY4j2Pf3Yzd6jdLKnGXPMrsH5PCR7yIUC23ges4Arzw54hlM74XMEsTfXtNlA",
-    "token_uri": "https://oauth2.googleapis.com/token",
-    "client_id": "236231780397-sth57fqritpnsmta8enftoj8qddsgcd8.apps.googleusercontent.com",
-    "client_secret": "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",
-    "scopes": ["https://www.googleapis.com/auth/calendar"],
-    "universe_domain": "googleapis.com",
-    "account": "",
-    "expiry": "2025-09-10T22:09:47Z",
-}
-
-if isinstance(CALENDAR_CREDENTIALS_INFO.get("scopes"), list) and CALENDAR_CREDENTIALS_INFO["scopes"]:
-    SCOPES = CALENDAR_CREDENTIALS_INFO["scopes"]
-
-_TZINFO = tz.gettz(TIMEZONE)
-
-# ============= Create MCP Server =============
-
+# Create server
 mcp = FastMCP(
-    name="Unified Medical MCP Server (BigQuery + Calendar)",
-    port=PORT,
-    stateless_http=STATELESS,
-    debug=DEBUG,
+    name="Medical MCP BigQuery Server",
     instructions=(
-        "Unified MCP Server combining:\n"
-        "1. BigQuery: Read-only access to medical data (hospital, surgeons, patients, cases, lab_results)\n"
-        "2. Google Calendar: Full read/write access for calendar and event management\n\n"
-        "BigQuery Tools:\n"
-        "  - list_datasets(), list_tables(dataset), get_schema(dataset, table)\n"
-        "  - execute_query(dataset, sql, params?)\n"
-        "  - search_hospitals(), get_hospital(), list_specialties()\n"
-        "  - search_surgeons(), get_surgeon(), list_surgeon_subspecialties()\n\n"
-        "Calendar Tools:\n"
-        "  - list_calendars(), get_calendar(), update_calendar_meta()\n"
-        "  - list_events(), get_freebusy(), create_event(), upsert_event()\n"
-        "  - create_blocks_week() for batch event creation\n"
+        "Read-only & parameterized access to Google BigQuery (safe by design).\n"
+        "Datasets/tables par défaut: prod_public.(hospital|surgeons|patients|cases|lab_results)\n"
+        "Tools:\n"
+        "  - echo_tool(text)                                # Echo the input text\n"
+        "  - list_datasets()                                # List all available BigQuery datasets\n"
+        "  - list_tables(dataset)                           # List all tables in a dataset\n"
+        "  - get_table_schema(dataset, table)              # Get schema of a table (legacy)\n"
+        "  - get_schema(dataset, table)                    # Get schema of a table (new)\n"
+        "  - query_hospitals(limit)                        # Query hospital data (legacy)\n"
+        "  - search_hospitals_by_city(city, limit)         # Search hospitals by city (legacy)\n"
+        "  - execute_query(dataset, sql, params?)          # Execute parameterized query (no SELECT *)\n"
+        "  - list_specialties(dataset?, table?, limit?)    # List hospital specialties\n"
+        "  - search_hospitals(city?, specialty?, name_contains?, include_contact?, limit?, dataset?, table?)\n"
+        "  - get_hospital(hospital_id, include_contact?, dataset?, table?)\n"
+        "  - list_surgeon_subspecialties(dataset?, table?, limit?)\n"
+        "  - list_hospital_surgeons(hospital_id, include_sensitive?, limit?, dataset?, table?)\n"
+        "  - search_surgeons(hospital_id?, name_contains?, sub_specialty?, languages?, on_call?, accepts_new_patients?, include_sensitive?, limit?, dataset?, table?)\n"
+        "  - get_surgeon(specialist_id, include_sensitive?, dataset?, table?)\n"
+        "Notes:\n"
+        "  • maximum_bytes_billed & row limits enforced.\n"
+        "  • Only datasets in ALLOWED_DATASETS are permitted (if set).\n"
+        "  • Contacts & sensitive fields gated by env flags.\n"
     ),
 )
 
-# ============= BigQuery Client Management =============
-
-_bq_client: Optional[bigquery.Client] = None
+# Client BigQuery global
+_client: Optional[bigquery.Client] = None
 
 def bq_client() -> bigquery.Client:
     """Retourne une instance du client BigQuery avec authentification par service account"""
-    global _bq_client
-    if _bq_client is None:
+    global _client
+    if _client is None:
         try:
-            credentials = service_account.Credentials.from_service_account_info(BQ_SERVICE_ACCOUNT_INFO)
-            _bq_client = bigquery.Client(credentials=credentials, project=PROJECT_ID)
+            credentials = service_account.Credentials.from_service_account_info(SERVICE_ACCOUNT_INFO)
+            _client = bigquery.Client(credentials=credentials, project=PROJECT_ID)
         except Exception as e:
+            # Fallback sur l'authentification par défaut
             print(f"Warning: Service account auth failed ({e}), using default auth")
-            _bq_client = bigquery.Client(project=PROJECT_ID) if PROJECT_ID else bigquery.Client()
-    return _bq_client
+            _client = bigquery.Client(project=PROJECT_ID) if PROJECT_ID else bigquery.Client()
+    return _client
 
-# ============= Calendar Service Management =============
-
-_calendar_service = None
-_calendar_creds = None
-
-def _build_calendar_creds() -> Credentials:
-    """Create OAuth credentials from embedded JSON."""
-    global _calendar_creds
-    if _calendar_creds is None:
-        _calendar_creds = Credentials.from_authorized_user_info(CALENDAR_CREDENTIALS_INFO, scopes=SCOPES)
-    return _calendar_creds
-
-def _calendar_svc():
-    """Return a Google Calendar service client (created lazily at first tool call)."""
-    global _calendar_service
-    if _calendar_service is None:
-        creds = _build_calendar_creds()
-        _calendar_service = build("calendar", "v3", credentials=creds, cache_discovery=False)
-    return _calendar_service
-
-# ============= BigQuery Utility Functions =============
+# ============= Fonctions utilitaires =============
 
 def _require_allowed(dataset: str) -> None:
     if ALLOWED_DATASETS and dataset not in ALLOWED_DATASETS:
-        raise ValueError(f"Dataset '{dataset}' is not allowed. Allowed: {sorted(ALLOWED_DATASETS)}")
+        raise ValueError(
+            f"Dataset '{dataset}' is not allowed. Allowed: {sorted(ALLOWED_DATASETS)}"
+        )
 
 def _forbid_select_star(sql: str) -> None:
     if re.search(r"(?is)\bselect\s*\*", sql):
@@ -226,7 +173,9 @@ def _select_if_exists(dataset: str, table: str, column: str, alias: Optional[str
 
 def _get_table_schema(dataset: str, table: str):
     client = bq_client()
-    ref = bigquery.TableReference(bigquery.DatasetReference(client.project, dataset), table)
+    ref = bigquery.TableReference(
+        bigquery.DatasetReference(client.project, dataset), table
+    )
     return client.get_table(ref).schema
 
 @lru_cache(maxsize=8)
@@ -258,6 +207,7 @@ def _resolve_hospitals(dataset_override: Optional[str] = None, table_override: O
                 if all(r in fields for r in required):
                     return ds, tb
 
+    # fallback: contient hospital
     for ds in ds_candidates:
         for tb in _list_table_ids(client, ds):
             if "hospital" in tb.lower():
@@ -309,10 +259,13 @@ def _detect_specialties_shape(dataset: str, table: str) -> Tuple[Optional[str], 
     """
     Retourne un triplet (spec_col, shape, leaf_field)
     shape ∈ {"none","scalar_string","scalar_csv","array_string","array_record"}
+    leaf_field: pour array_record, le sous-champ string plausible (ex: "specialty","name","value","s"), sinon None.
     """
     schema = _get_table_schema(dataset, table)
     fields = {f.name.lower(): f for f in schema}
 
+    # 1) primary_specialty (utile mais 'scalar_string', géré en parallèle)
+    # 2) specialties: on détecte sa vraie nature
     if "specialties" not in fields:
         return (None, "none", None)
 
@@ -320,92 +273,35 @@ def _detect_specialties_shape(dataset: str, table: str) -> Tuple[Optional[str], 
     ftype = f.field_type.upper()
     fmode = (f.mode or "NULLABLE").upper()
 
+    # STRING (NULLABLE): on suppose CSV "a;b;c"
     if ftype == "STRING" and fmode != "REPEATED":
         return ("specialties", "scalar_csv", None)
 
+    # ARRAY<STRING>
     if ftype == "STRING" and fmode == "REPEATED":
         return ("specialties", "array_string", None)
 
+    # ARRAY<RECORD> -> on cherche un champ string pertinent
     if ftype == "RECORD" and fmode == "REPEATED" and getattr(f, "fields", None):
         candidates = ["specialty", "name", "value", "label", "description", "s"]
         leaf = None
         for c in candidates:
             sub = next((sf for sf in f.fields if sf.name.lower() == c and sf.field_type.upper() == "STRING"), None)
             if sub:
-                leaf = sub.name
+                leaf = sub.name  # nom exact (respecte la casse)
                 break
+        # pas trouvé ? on renverra None et on fera TO_JSON_STRING comme fallback
         return ("specialties", "array_record", leaf)
 
+    # RECORD non répété ou autre forme exotique: on tente au pire TO_JSON_STRING
     return ("specialties", "scalar_string", None)
 
-# ============= Calendar Utility Functions =============
-
-def _rfc3339_local(dt_naive: datetime) -> str:
-    tzinfo = _TZINFO or tz.gettz("UTC")
-    return dt_naive.replace(tzinfo=tzinfo, microsecond=0).isoformat()
-
-def _date_only(s: str) -> bool:
-    return len(s) == 10 and s.count("-") == 2 and "T" not in s
-
-def _normalize_dt_field(val: str) -> Tuple[str, str]:
-    """Return ("date"| "dateTime", value) in RFC3339, interpreting naive values in TIMEZONE."""
-    if _date_only(val):
-        return ("date", val)
-    dt = dtp.parse(val)
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=_TZINFO or tz.gettz("UTC"))
-    return ("dateTime", dt.replace(microsecond=0).isoformat())
-
-def _parse_date(s: str) -> date:
-    return dtp.parse(s).date()
-
-def _list_calendar_items(svc) -> List[Dict[str, str]]:
-    out = []
-    token = None
-    while True:
-        resp = svc.calendarList().list(pageToken=token).execute()
-        out.extend({"summary": it.get("summary"), "id": it.get("id")} for it in resp.get("items", []))
-        token = resp.get("nextPageToken")
-        if not token:
-            break
-    return out
-
-def resolve_calendar_id(calendar_id_or_summary_or_prefix: str) -> str:
-    """
-    Resolve a calendar id from:
-      - full id (contains '@') or email
-      - exact summary match
-      - prefix of id (before '@group.calendar.google.com')
-    """
-    svc = _calendar_svc()
-    x = calendar_id_or_summary_or_prefix.strip()
-    if "@" in x:
-        return x
-    try:
-        svc.calendars().get(calendarId=x).execute()
-        return x
-    except Exception:
-        pass
-    items = _list_calendar_items(svc)
-    for it in items:
-        if it["summary"] == x:
-            return it["id"]
-    for it in items:
-        if it["id"].startswith(x):
-            return it["id"]
-    raise ValueError(
-        f"Calendrier introuvable pour '{x}'. Utilise un summary exact, l'ID complet, "
-        "ou un préfixe d'ID (voir list_calendars())."
-    )
-
-# ============= Common Tools =============
+# ============= Tools Legacy (pour compatibilité) =============
 
 @mcp.tool()
 def echo_tool(text: str) -> str:
     """Echo the input text"""
     return text
-
-# ============= BigQuery Tools =============
 
 @mcp.tool()
 def list_datasets() -> List[str]:
@@ -434,7 +330,7 @@ def list_tables(dataset: str = "prod_public") -> List[str]:
 
 @mcp.tool()
 def get_table_schema(dataset: str = "prod_public", table: str = "hospital") -> List[Dict[str, str]]:
-    """Get the schema of a BigQuery table"""
+    """Get the schema of a BigQuery table (legacy version)"""
     try:
         if ALLOWED_DATASETS and dataset not in ALLOWED_DATASETS:
             return [{"error": f"Dataset '{dataset}' is not allowed"}]
@@ -451,6 +347,42 @@ def get_table_schema(dataset: str = "prod_public", table: str = "hospital") -> L
         return schema
     except Exception as e:
         return [{"error": str(e)}]
+
+@mcp.tool()
+def query_hospitals(limit: int = 10) -> List[Dict[str, Any]]:
+    """Query hospital data from BigQuery (legacy version)"""
+    try:
+        client = bq_client()
+        query = f"""
+        SELECT hospital_id, hospital_name, city, primary_specialty, capacity_beds
+        FROM `{PROJECT_ID}.prod_public.hospital`
+        WHERE hospital_name IS NOT NULL
+        ORDER BY hospital_name
+        LIMIT {limit}
+        """
+        results = client.query(query).result()
+        return [dict(row) for row in results]
+    except Exception as e:
+        return [{"error": str(e)}]
+
+@mcp.tool()
+def search_hospitals_by_city(city: str, limit: int = 10) -> List[Dict[str, Any]]:
+    """Search hospitals by city name (legacy version)"""
+    try:
+        client = bq_client()
+        query = f"""
+        SELECT hospital_id, hospital_name, city, primary_specialty, capacity_beds
+        FROM `{PROJECT_ID}.prod_public.hospital`
+        WHERE LOWER(city) LIKE LOWER('%{city}%')
+        ORDER BY hospital_name
+        LIMIT {limit}
+        """
+        results = client.query(query).result()
+        return [dict(row) for row in results]
+    except Exception as e:
+        return [{"error": str(e)}]
+
+# ============= Tools Avancés =============
 
 @mcp.tool(name="get_schema", description="Get column schema for a table.")
 def get_schema(dataset: str, table: str) -> List[Dict[str, str]]:
@@ -527,6 +459,7 @@ def list_specialties(
     dataset: Optional[str] = None,
     table: Optional[str] = None,
 ) -> List[str]:
+    # localise la table hôpitaux (auto + fallback)
     try:
         ds, tbl = _resolve_hospitals(dataset, table)
     except Exception:
@@ -536,6 +469,7 @@ def list_specialties(
     client = bq_client()
     table_qual = _qual_table(ds, tbl)
 
+    # inventaire des colonnes
     schema = _get_table_schema(ds, tbl)
     cols = {f.name.lower() for f in schema}
     has_primary = "primary_specialty" in cols
@@ -544,6 +478,7 @@ def list_specialties(
 
     parts: List[str] = []
 
+    # 1) primary_specialty (STRING simple)
     if has_primary:
         parts.append(
             f"""
@@ -554,8 +489,10 @@ def list_specialties(
             """
         )
 
+    # 2) specialties selon la forme détectée
     if spec_col and shape != "none":
         if shape in ("scalar_string", "scalar_csv"):
+            # STRING => CSV "a;b;c"
             parts.append(
                 f"""
                 SELECT TRIM(x) AS specialty
@@ -567,6 +504,7 @@ def list_specialties(
                 """
             )
         elif shape == "array_string":
+            # ARRAY<STRING>
             parts.append(
                 f"""
                 SELECT TRIM(CAST(x AS STRING)) AS specialty
@@ -577,6 +515,7 @@ def list_specialties(
             )
         elif shape == "array_record":
             if leaf:
+                # ARRAY<RECORD<leaf STRING>>
                 parts.append(
                     f"""
                     SELECT TRIM(CAST(x.{leaf} AS STRING)) AS specialty
@@ -586,6 +525,7 @@ def list_specialties(
                     """
                 )
             else:
+                # Fallback: serialize en JSON puis TRIM
                 parts.append(
                     f"""
                     SELECT TRIM(CAST(TO_JSON_STRING(x) AS STRING)) AS specialty
@@ -596,6 +536,7 @@ def list_specialties(
                 )
 
     if not parts:
+        # Rien à agréger
         return []
 
     union_sql = "\nUNION ALL\n".join(parts)
@@ -641,6 +582,7 @@ def search_hospitals(
 
     fields = _schema_fields(ds, tbl)
 
+    # colonnes existantes -> alias cohérents
     select_cols: List[str] = []
     for col, alias in [
         ("hospital_id", "hospital_id"),
@@ -672,6 +614,7 @@ def search_hospitals(
         if col in fields:
             select_cols.append(f"{col} AS {alias}")
 
+    # Ajout contacts si autorisé et dispos
     if include_contact and HOSPITALS_CONTACT_ALLOWED:
         if "contact_phone" in fields:
             select_cols.append("contact_phone AS contact_phone")
@@ -679,9 +622,11 @@ def search_hospitals(
             select_cols.append("email AS email")
 
     if not select_cols:
+        # garde-fou
         select_cols.append("hospital_id AS hospital_id")
         select_cols.append("hospital_name AS hospital_name")
 
+    # WHERE dynamique
     where: List[str] = []
     params: List[bigquery.ScalarQueryParameter] = []
 
@@ -694,10 +639,12 @@ def search_hospitals(
         params.append(bigquery.ScalarQueryParameter("namepat", "STRING", f"%{name_contains.lower()}%"))
 
     if specialty:
+        # match primary_specialty exact (case-insensitive)
         conds: List[str] = []
         if "primary_specialty" in fields:
             conds.append("LOWER(primary_specialty) = @spec")
         if "specialties" in fields:
+            # specialties est une STRING ; on split/trim et compare
             conds.append("EXISTS (SELECT 1 FROM UNNEST(SPLIT(specialties,';')) AS s WHERE LOWER(TRIM(s)) = @spec)")
         if conds:
             where.append("(" + " OR ".join(conds) + ")")
@@ -705,6 +652,7 @@ def search_hospitals(
 
     where_sql = "WHERE " + " AND ".join(where) if where else ""
 
+    # Tri priorisant la capacité puis le nom si dispo
     order_bits: List[str] = []
     if "capacity_beds" in fields:
         order_bits.append("capacity_beds DESC")
@@ -815,6 +763,7 @@ def list_surgeon_subspecialties(
     client = bq_client()
     table_qual = _qual_table(ds, tbl)
 
+    # sub_specialty existe dans ton schéma sample
     sql = f"""
     SELECT DISTINCT sub_specialty
     FROM {table_qual}
@@ -1059,383 +1008,6 @@ def get_surgeon(
         return {"status": "not_found", "specialist_id": specialist_id}
     return {"status": "ok", "surgeon": dict(row.items())}
 
-# ============= Calendar Tools =============
-
-@mcp.tool(title="List Calendars", description="Lister les calendriers accessibles (summary, id).")
-def list_calendars() -> List[Dict[str, str]]:
-    svc = _calendar_svc()
-    return _list_calendar_items(svc)
-
-@mcp.tool(title="Get Calendar", description="Lire les métadonnées d'un calendrier.")
-def get_calendar(calendar_id: str = Field(description="ID, summary exact, ou préfixe d'ID")) -> Dict[str, Any]:
-    svc = _calendar_svc()
-    cid = resolve_calendar_id(calendar_id)
-    cal = svc.calendars().get(calendarId=cid).execute()
-    return {
-        "id": cal.get("id"),
-        "summary": cal.get("summary"),
-        "description": cal.get("description"),
-        "timeZone": cal.get("timeZone"),
-        "location": cal.get("location"),
-    }
-
-@mcp.tool(title="Update Calendar Meta", description="Mettre à jour summary/description/timeZone/location d'un calendrier (patch).")
-def update_calendar_meta(
-    calendar_id: str = Field(description="ID/summary/prefix du calendrier"),
-    summary: Optional[str] = Field(default=None, description="Nouveau nom (summary)"),
-    description: Optional[str] = Field(default=None, description="Nouvelle description"),
-    timeZone: Optional[str] = Field(default=None, description="Nouveau timeZone IANA"),
-    location: Optional[str] = Field(default=None, description="Nouvelle localisation"),
-) -> Dict[str, Any]:
-    svc = _calendar_svc()
-    cid = resolve_calendar_id(calendar_id)
-    body: Dict[str, Any] = {}
-    if summary is not None:
-        body["summary"] = summary
-    if description is not None:
-        body["description"] = description
-    if timeZone is not None:
-        body["timeZone"] = timeZone
-    if location is not None:
-        body["location"] = location
-    cal = svc.calendars().patch(calendarId=cid, body=body).execute()
-    return {
-        "status": "ok",
-        "calendar": {
-            "id": cal["id"],
-            "summary": cal.get("summary"),
-            "description": cal.get("description"),
-            "timeZone": cal.get("timeZone"),
-            "location": cal.get("location"),
-        },
-    }
-
-@mcp.tool(title="List Events", description="Lister les événements d'un calendrier entre deux dates (YYYY-MM-DD).")
-def list_events(
-    calendar_id: str = Field(description="ID/summary/prefix du calendrier"),
-    date_from: str = Field(description="Date début incluse (YYYY-MM-DD)"),
-    date_to: str = Field(description="Date fin incluse (YYYY-MM-DD)"),
-    q: Optional[str] = Field(default=None, description="Filtre texte"),
-    max_results: int = Field(default=2500, description="Nombre max d'événements"),
-) -> Dict[str, Any]:
-    svc = _calendar_svc()
-    cid = resolve_calendar_id(calendar_id)
-    start_naive = datetime.combine(_parse_date(date_from), time(0, 0))
-    end_naive = datetime.combine(_parse_date(date_to) + timedelta(days=1), time(0, 0))
-    tmin = _rfc3339_local(start_naive)
-    tmax = _rfc3339_local(end_naive)
-
-    params = {
-        "calendarId": cid,
-        "timeMin": tmin,
-        "timeMax": tmax,
-        "singleEvents": True,
-        "orderBy": "startTime",
-        "maxResults": int(max_results),
-    }
-    if q:
-        params["q"] = q
-
-    resp = svc.events().list(**params).execute()
-    items = resp.get("items", [])
-    events = []
-    for e in items:
-        events.append(
-            {
-                "id": e.get("id"),
-                "status": e.get("status"),
-                "summary": e.get("summary"),
-                "description": e.get("description"),
-                "location": e.get("location"),
-                "start": (e.get("start", {}).get("dateTime") or e.get("start", {}).get("date")),
-                "end": (e.get("end", {}).get("dateTime") or e.get("end", {}).get("date")),
-                "htmlLink": e.get("htmlLink"),
-                "transparency": e.get("transparency"),
-            }
-        )
-    return {"calendar_id": cid, "events": events}
-
-@mcp.tool(title="Get FreeBusy", description="Lire les périodes occupées (busy) d'un calendrier sur une fenêtre.")
-def get_freebusy(
-    calendar_id: str = Field(description="ID/summary/prefix du calendrier"),
-    date_from: str = Field(description="Date début (YYYY-MM-DD)"),
-    date_to: str = Field(description="Date fin (YYYY-MM-DD)"),
-) -> Dict[str, Any]:
-    svc = _calendar_svc()
-    cid = resolve_calendar_id(calendar_id)
-    start_naive = datetime.combine(_parse_date(date_from), time(0, 0))
-    end_naive = datetime.combine(_parse_date(date_to) + timedelta(days=1), time(0, 0))
-    body = {
-        "timeMin": _rfc3339_local(start_naive),
-        "timeMax": _rfc3339_local(end_naive),
-        "timeZone": TIMEZONE,
-        "items": [{"id": cid}],
-    }
-    fb = svc.freebusy().query(body=body).execute()
-    return {"calendar_id": cid, "busy": fb["calendars"][cid].get("busy", [])}
-
-@mcp.tool(
-    title="Create Event",
-    description="Créer un événement (all-day ou horodaté). Paramètres: start_iso/end_iso (date 'YYYY-MM-DD' ou RFC3339), summary, description?, location?, block?, send_updates?",
-)
-def create_event(
-    calendar_id: str = Field(description="ID/summary/prefix du calendrier"),
-    start_iso: str = Field(description="Date/DateTime début (YYYY-MM-DD ou RFC3339)"),
-    end_iso: str = Field(description="Date/DateTime fin (YYYY-MM-DD ou RFC3339)"),
-    summary: str = Field(description="Titre de l'événement"),
-    description: Optional[str] = Field(default=None, description="Description"),
-    location: Optional[str] = Field(default=None, description="Lieu"),
-    block: bool = Field(default=True, description="Opaque=occupe (True) / transparent (False)"),
-    send_updates: str = Field(default="none", description="none|all|externalOnly"),
-) -> Dict[str, Any]:
-    svc = _calendar_svc()
-    cid = resolve_calendar_id(calendar_id)
-
-    start_kind, start_val = _normalize_dt_field(start_iso)
-    end_kind, end_val = _normalize_dt_field(end_iso)
-
-    if start_kind != "date" and end_kind != "date":
-        sdt = dtp.parse(start_val)
-        edt = dtp.parse(end_val)
-        if edt <= sdt:
-            raise ValueError("end_iso doit être strictement après start_iso")
-
-    if start_kind == "date" and end_kind == "date":
-        start_field = {"date": start_val}
-        end_field = {"date": end_val}
-    else:
-        start_field = {"dateTime": start_val, "timeZone": TIMEZONE}
-        end_field = {"dateTime": end_val, "timeZone": TIMEZONE}
-
-    body: Dict[str, Any] = {
-        "summary": summary,
-        "start": start_field,
-        "end": end_field,
-        "transparency": "opaque" if block else "transparent",
-    }
-    if description:
-        body["description"] = description
-    if location:
-        body["location"] = location
-
-    evt = svc.events().insert(calendarId=cid, body=body, sendUpdates=send_updates).execute()
-    return {
-        "status": "created",
-        "event": {
-            "id": evt.get("id"),
-            "summary": evt.get("summary"),
-            "description": evt.get("description"),
-            "location": evt.get("location"),
-            "start": (evt.get("start", {}).get("dateTime") or evt.get("start", {}).get("date")),
-            "end": (evt.get("end", {}).get("dateTime") or evt.get("end", {}).get("date")),
-            "transparency": evt.get("transparency"),
-            "htmlLink": evt.get("htmlLink"),
-        },
-    }
-
-@mcp.tool(
-    title="Upsert Event",
-    description="Créer OU mettre à jour. Si event_id est fourni ⇒ patch, sinon ⇒ create_event. Paramètres idem create_event + event_id?",
-)
-def upsert_event(
-    calendar_id: str = Field(description="ID/summary/prefix du calendrier"),
-    start_iso: Optional[str] = Field(default=None, description="Date/DateTime début (pour création/MAJ)"),
-    end_iso: Optional[str] = Field(default=None, description="Date/DateTime fin (pour création/MAJ)"),
-    summary: Optional[str] = Field(default=None, description="Titre (pour création/MAJ)"),
-    description: Optional[str] = Field(default=None, description="Description"),
-    location: Optional[str] = Field(default=None, description="Lieu"),
-    block: Optional[bool] = Field(default=None, description="Force opaque/transparent"),
-    event_id: Optional[str] = Field(default=None, description="ID de l'événement à mettre à jour"),
-) -> Dict[str, Any]:
-    if event_id:
-        return update_event(
-            calendar_id=calendar_id,
-            event_id=event_id,
-            summary=summary,
-            description=description,
-            location=location,
-            start_iso=start_iso,
-            end_iso=end_iso,
-            block=block,
-        )
-    else:
-        if not (start_iso and end_iso and summary):
-            raise ValueError("Pour créer, fournir start_iso, end_iso et summary.")
-        return create_event(
-            calendar_id=calendar_id,
-            start_iso=start_iso,
-            end_iso=end_iso,
-            summary=summary,
-            description=description,
-            location=location,
-            block=(True if block is None else block),
-            send_updates="none",
-        )
-
-@mcp.tool(
-    title="Update Event",
-    description="Mettre à jour un événement existant: summary/description/location et/ou horaires (start_iso/end_iso). Gère date-only.",
-)
-def update_event(
-    calendar_id: str = Field(description="ID/summary/prefix du calendrier"),
-    event_id: str = Field(description="ID de l'événement à patcher"),
-    summary: Optional[str] = Field(default=None, description="Nouveau titre"),
-    description: Optional[str] = Field(default=None, description="Nouvelle description"),
-    location: Optional[str] = Field(default=None, description="Nouveau lieu"),
-    start_iso: Optional[str] = Field(default=None, description="Nouvelle date/datetime de début"),
-    end_iso: Optional[str] = Field(default=None, description="Nouvelle date/datetime de fin"),
-    block: Optional[bool] = Field(default=None, description="Force la transparence"),
-) -> Dict[str, Any]:
-    svc = _calendar_svc()
-    cid = resolve_calendar_id(calendar_id)
-    evt = svc.events().get(calendarId=cid, eventId=event_id).execute()
-    body: Dict[str, Any] = {}
-    if summary is not None:
-        body["summary"] = summary
-    if description is not None:
-        body["description"] = description
-    if location is not None:
-        body["location"] = location
-
-    if start_iso is not None or end_iso is not None:
-        start_val = start_iso or (evt.get("start", {}).get("dateTime") or evt.get("start", {}).get("date"))
-        end_val = end_iso or (evt.get("end", {}).get("dateTime") or evt.get("end", {}).get("date"))
-        sk, sv = _normalize_dt_field(start_val)
-        ek, ev = _normalize_dt_field(end_val)
-
-        if sk == "date" and ek == "date":
-            body["start"] = {"date": sv}
-            body["end"] = {"date": ev}
-        else:
-            body["start"] = {"dateTime": sv, "timeZone": TIMEZONE}
-            body["end"] = {"dateTime": ev, "timeZone": TIMEZONE}
-
-        if not _date_only(sv) and not _date_only(ev):
-            sdt = dtp.parse(sv)
-            edt = dtp.parse(ev)
-            if edt <= sdt:
-                raise ValueError("end_iso doit être strictement après start_iso")
-
-    if block is not None:
-        body["transparency"] = "opaque" if block else "transparent"
-
-    patched = svc.events().patch(calendarId=cid, eventId=event_id, body=body).execute()
-    return {
-        "status": "ok",
-        "event": {
-            "id": patched.get("id"),
-            "summary": patched.get("summary"),
-            "description": patched.get("description"),
-            "location": patched.get("location"),
-            "start": (patched.get("start", {}).get("dateTime") or patched.get("start", {}).get("date")),
-            "end": (patched.get("end", {}).get("dateTime") or patched.get("end", {}).get("date")),
-            "transparency": patched.get("transparency"),
-            "htmlLink": patched.get("htmlLink"),
-        },
-    }
-
-@mcp.tool(
-    title="Create Blocks Week",
-    description="Créer en batch des créneaux quotidiens entre date_from et date_to, sur certains jours (ex: 1-5 = Lun-Ven). Heures HH:MM.",
-)
-def create_blocks_week(
-    calendar_id: str = Field(description="ID/summary/prefix du calendrier"),
-    date_from: str = Field(description="YYYY-MM-DD (inclus)"),
-    date_to: str = Field(description="YYYY-MM-DD (inclus)"),
-    start_time: str = Field(description="Heure début HH:MM"),
-    end_time: str = Field(description="Heure fin HH:MM"),
-    summary: str = Field(description="Titre des créneaux"),
-    description: Optional[str] = Field(default=None, description="Description"),
-    location: Optional[str] = Field(default=None, description="Lieu"),
-    weekdays: str = Field(default="1-5", description="Jours 1-7, ranges ex: '1-5,7'"),
-    block: bool = Field(default=True, description="Opaque (occupé)"),
-) -> Dict[str, Any]:
-    svc = _calendar_svc()
-    cid = resolve_calendar_id(calendar_id)
-    d0 = _parse_date(date_from)
-    d1 = _parse_date(date_to)
-
-    # parse weekdays
-    allowed = set()
-    for chunk in weekdays.split(","):
-        chunk = chunk.strip()
-        if not chunk:
-            continue
-        if "-" in chunk:
-            a, b = [int(x) for x in chunk.split("-")]
-            allowed.update(range(a, b + 1))
-        else:
-            allowed.add(int(chunk))
-
-    sh, sm = [int(x) for x in start_time.split(":")]
-    eh, em = [int(x) for x in end_time.split(":")]
-
-    created: List[Dict[str, Any]] = []
-    cur = d0
-    while cur <= d1:
-        if (cur.weekday() + 1) in allowed:
-            start_iso = _rfc3339_local(datetime.combine(cur, time(sh, sm)))
-            end_iso = _rfc3339_local(datetime.combine(cur, time(eh, em)))
-            evt = svc.events().insert(
-                calendarId=cid,
-                body={
-                    "summary": summary,
-                    "description": description,
-                    "location": location,
-                    "start": {"dateTime": start_iso, "timeZone": TIMEZONE},
-                    "end": {"dateTime": end_iso, "timeZone": TIMEZONE},
-                    "transparency": "opaque" if block else "transparent",
-                },
-                sendUpdates="none",
-            ).execute()
-            created.append(
-                {
-                    "id": evt.get("id"),
-                    "start": evt.get("start", {}).get("dateTime"),
-                    "end": evt.get("end", {}).get("dateTime"),
-                    "htmlLink": evt.get("htmlLink"),
-                }
-            )
-        cur += timedelta(days=1)
-
-    return {"status": "created", "count": len(created), "events": created}
-
-# ============= Legacy BigQuery Tools (for compatibility) =============
-
-@mcp.tool()
-def query_hospitals(limit: int = 10) -> List[Dict[str, Any]]:
-    """Query hospital data from BigQuery (legacy version)"""
-    try:
-        client = bq_client()
-        query = f"""
-        SELECT hospital_id, hospital_name, city, primary_specialty, capacity_beds
-        FROM `{PROJECT_ID}.prod_public.hospital`
-        WHERE hospital_name IS NOT NULL
-        ORDER BY hospital_name
-        LIMIT {limit}
-        """
-        results = client.query(query).result()
-        return [dict(row) for row in results]
-    except Exception as e:
-        return [{"error": str(e)}]
-
-@mcp.tool()
-def search_hospitals_by_city(city: str, limit: int = 10) -> List[Dict[str, Any]]:
-    """Search hospitals by city name (legacy version)"""
-    try:
-        client = bq_client()
-        query = f"""
-        SELECT hospital_id, hospital_name, city, primary_specialty, capacity_beds
-        FROM `{PROJECT_ID}.prod_public.hospital`
-        WHERE LOWER(city) LIKE LOWER('%{city}%')
-        ORDER BY hospital_name
-        LIMIT {limit}
-        """
-        results = client.query(query).result()
-        return [dict(row) for row in results]
-    except Exception as e:
-        return [{"error": str(e)}]
-
 # ============= Resources =============
 
 @mcp.resource("bq://datasets")
@@ -1453,19 +1025,11 @@ def echo_template(text: str) -> str:
     """Echo the input text"""
     return f"Echo: {text}"
 
-@mcp.resource("greeting://{name}")
-def get_greeting(name: str) -> str:
-    """Get a personalized greeting"""
-    return f"Hello, {name}!"
-
 # ============= Prompts =============
 
 @mcp.prompt("echo")
 def echo_prompt(text: str) -> str:
     return text
 
-# ============= Main =============
-
 if __name__ == "__main__":
-    # For FastMCP Cloud, use streamable-http transport
-    mcp.run(transport="streamable-http" if STATELESS else None)
+    mcp.run()
