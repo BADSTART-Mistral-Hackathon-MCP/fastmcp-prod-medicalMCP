@@ -1,29 +1,63 @@
 """
-FastMCP Echo Server with Advanced BigQuery Integration
+FastMCP Medical BigQuery Server — Cloud-ready (FastMCP)
+- Combine le script principal (SA credentials inclus pour test) avec les Tools avancés BigQuery.
+- Conserve et expose les variables d'env (avec valeurs par défaut) pour config cloud.
 """
+
+from __future__ import annotations
 
 import os
 import re
 from functools import lru_cache
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, Union
+
 from fastmcp import FastMCP
 from google.cloud import bigquery
 from google.cloud.bigquery import QueryJobConfig
 from google.oauth2 import service_account
 
-# Configuration du projet
+
+# ======================================================================================
+# Configuration projet & credentials (conservés du script principal)
+# ======================================================================================
+
+# Projet par défaut (peut être écrasé par GCP_PROJECT plus bas)
 PROJECT_ID = "mcp-hackathon-mistral"
+
+# Credentials - hardcodés pour le test (À SÉCURISER EN PRODUCTION!)
+SERVICE_ACCOUNT_INFO = {
+    "type": "service_account",
+    "project_id": "mcp-hackathon-mistral",
+    "private_key_id": "b2b3d966d5b3bd579c901e6be63b0d13212a2e14",
+    "private_key": "-----BEGIN PRIVATE KEY-----\nMIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQC7Y4nD9/twKbfX\ny0r/u4vZaMvxCO/7+B+PANseDp+JFVhMCN1XALxKE/tNpmCU41iZPVHpT9zaJfye\nrBTpPOxmbKXP+HOLA10UnWV5M9Uz2MEbJrii72X4dwKcSHd35scId9yF+Wj4tawH\njTsl+b3xEHPZO/Xk9igIHwcZydmFSrw2h/McIOpYDV5QFZvHiNjgm6ij91sVOvse\nnFn5mEAm+BdvPMSNaI5LD71wBAzHF0ID9+xU7XSwb91ptRGVKF8L9hZksNvTQUeS\nbUh42m9TmVLFstPA3AJpBTxOyAKsA9S2Uo7vAyW6aaz1SfC6PV6tNrJE92NpitDt\nREFQT9pJAgMBAAECggEAQyfuFIRH4S+iSjz6GOJewUC0biKU1wlaTgaxgHkfJaK3\nrTA0Gt0Rnb7BfleVH2bGtsxqEaJkdO3ONhNXvyrtUdu4JOtWhUhkUGIEHsa7rsQM\nmK1s2D/RnJUSI245GohjZh6GsqDqxM9e4qnzu61gLAeIbR73BeJOAHMWOWDEiuba\niUgg9+qCFbgjjBsh+GpuzejSp+akhAifSH5CUrAtXzQL9IR/nTLzDfCUuSxvrXBL\nfJlRR6zyHegcTk2ZuZqM65xuC4Ejk2rRBd33gbGPGGqoWuaGr91gqNn554I7icwb\nGlrWlkSWJRzq9fPc0SmGG3wIUu2cdtccR0qSqMS/bQKBgQD4Sgtz0ckVwCavG9iH\nc9UAVC/WD5q54lyWw8uYmE+rGjDmgDS0qdw3pHnAGjeYOIDTsmaq4Gp53dc9woAI\nHrMjUq7uI5h8dgXkJSU/VCS/deNK4Z/TPN8r/c3c9r1RRgVhdWn5IUu8FkWY/dVq\nGvl15T+r5uBrMyk0TidcPKxnXwKBgQDBNVJHuThRzleoBL3Nq2LC0mERwcQ57ZbM\nt7UM7RDn+y52rKXPq+NyGOT7pfxROMDSCmfe/N/plLz7iFy45rXczAWDLgpl9puH\nhOEVoI/KjHT2YUeefaSyg0wuueiAEPg9DjQ6ts2yrA2q4nFNVVRJ3TqHSfsHjeCc\n+hJxTs7nVwKBgGsVPDU6cDhiRAzXvJ5GtcHLjUoMNtYeq4IWdbOdVRbdV+PBvXmB\nnMmetSfF5t5O2Dj1Q1RFL4bZx6AKR7+4xdfhLDLmxThAiq/n2VWjy6mLhXjhMFYh\ndbr6XpQDEol/4ogy5H6e/pPjIyclqqp1ccuIENrp2zZAvW+imVUtkcmPAoGARfd+\nTXT4vT9BJRpadcGL6UtwVZLa8bNlectJKF4tUiT3JYjOHw97NVVoju0EG5G22hlk\nli7zE06GxXwTP+5ki4nisSeaImSU3BW1wTQ8/jexH4wI+I89dlvv2bf/R2ldzBZ5\nuY17nimKZYjNSRkOhhU0XcvfuVOatJ4m0Zudd88CgYEAp20twaSy2G08O6oapaPp\ngH+WZKRJJ54bMgFAuilbrSG0bnr4iTSJHkbySjwim2rXWb5lZvO86HACodDUfG3y\n8BJDicnKjFz2GmkOtBeEHK6Yips9dlUhxA17bU7bxpTSEiFfETtnH+pGi1GQPjV2\nCigEk6Z7rceyKJnxU+lKD/4=\n-----END PRIVATE KEY-----\n",
+    "client_email": "mcp-bq-sa@mcp-hackathon-mistral.iam.gserviceaccount.com",
+    "client_id": "108403027016152214340",
+    "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+    "token_uri": "https://oauth2.googleapis.com/token",
+    "auth_provider_x509_cert_url": "https://www.googleapis.com/oauth2/v1/certs",
+    "client_x509_cert_url": "https://www.googleapis.com/robot/v1/metadata/x509/mcp-bq-sa%40mcp-hackathon-mistral.iam.gserviceaccount.com",
+    "universe_domain": "googleapis.com",
+}
+
+# ======================================================================================
+# Variables d'environnement (préservées / ajoutées du second script, avec défauts)
+# ======================================================================================
+
+# Projet effectif (priorité aux env, sinon constante initiale)
+PROJECT = os.getenv("GCP_PROJECT") or PROJECT_ID
+
+# Localisation standard BigQuery (utilisable pour datasets / jobs si besoin)
 LOCATION = os.getenv("BQ_LOCATION", "EU")
 
 # Datasets autorisés (vide = tous)
 _ALLOWED = [d.strip() for d in os.getenv("ALLOWED_DATASETS", "").split(",") if d.strip()]
 ALLOWED_DATASETS = set(_ALLOWED) if _ALLOWED else set()
 
-# Limites
-MAX_BYTES_BILLED = int(os.getenv("MAX_BYTES_BILLED", "200000000"))
+# Limites de sécurité
+MAX_BYTES_BILLED = int(os.getenv("MAX_BYTES_BILLED", "200000000"))  # ~200MB par défaut
 MAX_ROWS = int(os.getenv("MAX_ROWS", "1000"))
 
-# Défauts
+# Défauts / noms de tables (alignés avec tes schémas)
 DEFAULT_DATASET = "prod_public"
 
 HOSPITALS_DATASET = os.getenv("HOSPITALS_DATASET", DEFAULT_DATASET).strip()
@@ -43,73 +77,39 @@ CASES_TABLE = os.getenv("CASES_TABLE", "cases").strip()
 LABS_DATASET = os.getenv("LABS_DATASET", DEFAULT_DATASET).strip()
 LABS_TABLE = os.getenv("LABS_TABLE", "lab_results").strip()
 
-# Credentials - hardcodés pour le test (À SÉCURISER EN PRODUCTION!)
-SERVICE_ACCOUNT_INFO = {
-    "type": "service_account",
-    "project_id": "mcp-hackathon-mistral",
-    "private_key_id": "b2b3d966d5b3bd579c901e6be63b0d13212a2e14",
-    "private_key": "-----BEGIN PRIVATE KEY-----\nMIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQC7Y4nD9/twKbfX\ny0r/u4vZaMvxCO/7+B+PANseDp+JFVhMCN1XALxKE/tNpmCU41iZPVHpT9zaJfye\nrBTpPOxmbKXP+HOLA10UnWV5M9Uz2MEbJrii72X4dwKcSHd35scId9yF+Wj4tawH\njTsl+b3xEHPZO/Xk9igIHwcZydmFSrw2h/McIOpYDV5QFZvHiNjgm6ij91sVOvse\nnFn5mEAm+BdvPMSNaI5LD71wBAzHF0ID9+xU7XSwb91ptRGVKF8L9hZksNvTQUeS\nbUh42m9TmVLFstPA3AJpBTxOyAKsA9S2Uo7vAyW6aaz1SfC6PV6tNrJE92NpitDt\nREFQT9pJAgMBAAECggEAQyfuFIRH4S+iSjz6GOJewUC0biKU1wlaTgaxgHkfJaK3\nrTA0Gt0Rnb7BfleVH2bGtsxqEaJkdO3ONhNXvyrtUdu4JOtWhUhkUGIEHsa7rsQM\nmK1s2D/RnJUSI245GohjZh6GsqDqxM9e4qnzu61gLAeIbR73BeJOAHMWOWDEiuba\niUgg9+qCFbgjjBsh+GpuzejSp+akhAifSH5CUrAtXzQL9IR/nTLzDfCUuSxvrXBL\nfJlRR6zyHegcTk2ZuZqM65xuC4Ejk2rRBd33gbGPGGqoWuaGr91gqNn554I7icwb\nGlrWlkSWJRzq9fPc0SmGG3wIUu2cdtccR0qSqMS/bQKBgQD4Sgtz0ckVwCavG9iH\nc9UAVC/WD5q54lyWw8uYmE+rGjDmgDS0qdw3pHnAGjeYOIDTsmaq4Gp53dc9woAI\nHrMjUq7uI5h8dgXkJSU/VCS/deNK4Z/TPN8r/c3c9r1RRgVhdWn5IUu8FkWY/dVq\nGvl15T+r5uBrMyk0TidcPKxnXwKBgQDBNVJHuThRzleoBL3Nq2LC0mERwcQ57ZbM\nt7UM7RDn+y52rKXPq+NyGOT7pfxROMDSCmfe/N/plLz7iFy45rXczAWDLgpl9puH\nhOEVoI/KjHT2YUeefaSyg0wuueiAEPg9DjQ6ts2yrA2q4nFNVVRJ3TqHSfsHjeCc\n+hJxTs7nVwKBgGsVPDU6cDhiRAzXvJ5GtcHLjUoMNtYeq4IWdbOdVRbdV+PBvXmB\nnMmetSfF5t5O2Dj1Q1RFL4bZx6AKR7+4xdfhLDLmxThAiq/n2VWjy6mLhXjhMFYh\ndbr6XpQDEol/4ogy5H6e/pPjIyclqqp1ccuIENrp2zZAvW+imVUtkcmPAoGARfd+\nTXT4vT9BJRpadcGL6UtwVZLa8bNlectJKF4tUiT3JYjOHw97NVVoju0EG5G22hlk\nli7zE06GxXwTP+5ki4nisSeaImSU3BW1wTQ8/jexH4wI+I89dlvv2bf/R2ldzBZ5\nuY17nimKZYjNSRkOhhU0XcvfuVOatJ4m0Zudd88CgYEAp20twaSy2G08O6oapaPp\ngH+WZKRJJ54bMgFAuilbrSG0bnr4iTSJHkbySjwim2rXWb5lZvO86HACodDUfG3y\n8BJDicnKjFz2GmkOtBeEHK6Yips9dlUhxA17bU7bxpTSEiFfETtnH+pGi1GQPjV2\nCigEk6Z7rceyKJnxU+lKD/4=\n-----END PRIVATE KEY-----\n",
-    "client_email": "mcp-bq-sa@mcp-hackathon-mistral.iam.gserviceaccount.com",
-    "client_id": "108403027016152214340",
-    "auth_uri": "https://accounts.google.com/o/oauth2/auth",
-    "token_uri": "https://oauth2.googleapis.com/token",
-    "auth_provider_x509_cert_url": "https://www.googleapis.com/oauth2/v1/certs",
-    "client_x509_cert_url": "https://www.googleapis.com/robot/v1/metadata/x509/mcp-bq-sa%40mcp-hackathon-mistral.iam.gserviceaccount.com",
-    "universe_domain": "googleapis.com"
-}
 
-# Create server
-mcp = FastMCP(
-    name="Medical MCP BigQuery Server",
-    instructions=(
-        "Read-only & parameterized access to Google BigQuery (safe by design).\n"
-        "Datasets/tables par défaut: prod_public.(hospital|surgeons|patients|cases|lab_results)\n"
-        "Tools:\n"
-        "  - echo_tool(text)                                # Echo the input text\n"
-        "  - list_datasets()                                # List all available BigQuery datasets\n"
-        "  - list_tables(dataset)                           # List all tables in a dataset\n"
-        "  - get_table_schema(dataset, table)              # Get schema of a table (legacy)\n"
-        "  - get_schema(dataset, table)                    # Get schema of a table (new)\n"
-        "  - query_hospitals(limit)                        # Query hospital data (legacy)\n"
-        "  - search_hospitals_by_city(city, limit)         # Search hospitals by city (legacy)\n"
-        "  - execute_query(dataset, sql, params?)          # Execute parameterized query (no SELECT *)\n"
-        "  - list_specialties(dataset?, table?, limit?)    # List hospital specialties\n"
-        "  - search_hospitals(city?, specialty?, name_contains?, include_contact?, limit?, dataset?, table?)\n"
-        "  - get_hospital(hospital_id, include_contact?, dataset?, table?)\n"
-        "  - list_surgeon_subspecialties(dataset?, table?, limit?)\n"
-        "  - list_hospital_surgeons(hospital_id, include_sensitive?, limit?, dataset?, table?)\n"
-        "  - search_surgeons(hospital_id?, name_contains?, sub_specialty?, languages?, on_call?, accepts_new_patients?, include_sensitive?, limit?, dataset?, table?)\n"
-        "  - get_surgeon(specialist_id, include_sensitive?, dataset?, table?)\n"
-        "Notes:\n"
-        "  • maximum_bytes_billed & row limits enforced.\n"
-        "  • Only datasets in ALLOWED_DATASETS are permitted (if set).\n"
-        "  • Contacts & sensitive fields gated by env flags.\n"
-    ),
-)
+# ======================================================================================
+# FastMCP server
+# ======================================================================================
+
+mcp = FastMCP("Medical MCP BigQuery Server")
 
 # Client BigQuery global
 _client: Optional[bigquery.Client] = None
 
+
 def bq_client() -> bigquery.Client:
-    """Retourne une instance du client BigQuery avec authentification par service account"""
+    """Retourne une instance du client BigQuery. Priorité au Service Account fourni,
+    sinon fallback ADC. Le projet vient de PROJECT (env) ou PROJECT_ID."""
     global _client
     if _client is None:
         try:
             credentials = service_account.Credentials.from_service_account_info(SERVICE_ACCOUNT_INFO)
-            _client = bigquery.Client(credentials=credentials, project=PROJECT_ID)
+            _client = bigquery.Client(credentials=credentials, project=PROJECT)
         except Exception as e:
             # Fallback sur l'authentification par défaut
             print(f"Warning: Service account auth failed ({e}), using default auth")
-            _client = bigquery.Client(project=PROJECT_ID) if PROJECT_ID else bigquery.Client()
+            _client = bigquery.Client(project=PROJECT)
     return _client
 
-# ============= Fonctions utilitaires =============
+
+# ======================================================================================
+# Garde-fous & utilitaires (portés du second script)
+# ======================================================================================
 
 def _require_allowed(dataset: str) -> None:
     if ALLOWED_DATASETS and dataset not in ALLOWED_DATASETS:
-        raise ValueError(
-            f"Dataset '{dataset}' is not allowed. Allowed: {sorted(ALLOWED_DATASETS)}"
-        )
+        raise ValueError(f"Dataset '{dataset}' is not allowed. Allowed: {sorted(ALLOWED_DATASETS)}")
 
 def _forbid_select_star(sql: str) -> None:
     if re.search(r"(?is)\bselect\s*\*", sql):
@@ -171,12 +171,6 @@ def _select_if_exists(dataset: str, table: str, column: str, alias: Optional[str
         return f"{column} AS {alias or column}"
     return None
 
-def _get_table_schema(dataset: str, table: str):
-    client = bq_client()
-    ref = bigquery.TableReference(
-        bigquery.DatasetReference(client.project, dataset), table
-    )
-    return client.get_table(ref).schema
 
 @lru_cache(maxsize=8)
 def _resolve_hospitals(dataset_override: Optional[str] = None, table_override: Optional[str] = None) -> Tuple[str, str]:
@@ -207,7 +201,6 @@ def _resolve_hospitals(dataset_override: Optional[str] = None, table_override: O
                 if all(r in fields for r in required):
                     return ds, tb
 
-    # fallback: contient hospital
     for ds in ds_candidates:
         for tb in _list_table_ids(client, ds):
             if "hospital" in tb.lower():
@@ -255,134 +248,85 @@ def _resolve_surgeons(dataset_override: Optional[str] = None, table_override: Op
 
     raise ValueError("Cannot locate surgeons table. Set SURGEONS_DATASET/SURGEONS_TABLE or pass dataset/table.")
 
-def _detect_specialties_shape(dataset: str, table: str) -> Tuple[Optional[str], str, Optional[str]]:
-    """
-    Retourne un triplet (spec_col, shape, leaf_field)
-    shape ∈ {"none","scalar_string","scalar_csv","array_string","array_record"}
-    leaf_field: pour array_record, le sous-champ string plausible (ex: "specialty","name","value","s"), sinon None.
-    """
-    schema = _get_table_schema(dataset, table)
-    fields = {f.name.lower(): f for f in schema}
 
-    # 1) primary_specialty (utile mais 'scalar_string', géré en parallèle)
-    # 2) specialties: on détecte sa vraie nature
-    if "specialties" not in fields:
-        return (None, "none", None)
-
-    f = fields["specialties"]
-    ftype = f.field_type.upper()
-    fmode = (f.mode or "NULLABLE").upper()
-
-    # STRING (NULLABLE): on suppose CSV "a;b;c"
-    if ftype == "STRING" and fmode != "REPEATED":
-        return ("specialties", "scalar_csv", None)
-
-    # ARRAY<STRING>
-    if ftype == "STRING" and fmode == "REPEATED":
-        return ("specialties", "array_string", None)
-
-    # ARRAY<RECORD> -> on cherche un champ string pertinent
-    if ftype == "RECORD" and fmode == "REPEATED" and getattr(f, "fields", None):
-        candidates = ["specialty", "name", "value", "label", "description", "s"]
-        leaf = None
-        for c in candidates:
-            sub = next((sf for sf in f.fields if sf.name.lower() == c and sf.field_type.upper() == "STRING"), None)
-            if sub:
-                leaf = sub.name  # nom exact (respecte la casse)
-                break
-        # pas trouvé ? on renverra None et on fera TO_JSON_STRING comme fallback
-        return ("specialties", "array_record", leaf)
-
-    # RECORD non répété ou autre forme exotique: on tente au pire TO_JSON_STRING
-    return ("specialties", "scalar_string", None)
-
-# ============= Tools Legacy (pour compatibilité) =============
+# ======================================================================================
+# Tools de base (script initial) — conservés
+# ======================================================================================
 
 @mcp.tool()
 def echo_tool(text: str) -> str:
     """Echo the input text"""
     return text
 
-@mcp.tool()
-def list_datasets() -> List[str]:
-    """List all available BigQuery datasets in the project"""
-    try:
-        if ALLOWED_DATASETS:
-            return sorted(ALLOWED_DATASETS)
-        client = bq_client()
-        datasets = sorted(ds.dataset_id for ds in client.list_datasets())
-        return datasets if datasets else ["No datasets found"]
-    except Exception as e:
-        return [f"Error: {str(e)}"]
 
-@mcp.tool()
-def list_tables(dataset: str = "prod_public") -> List[str]:
-    """List all tables in a BigQuery dataset"""
-    try:
-        if ALLOWED_DATASETS and dataset not in ALLOWED_DATASETS:
-            return [f"Dataset '{dataset}' is not allowed"]
-        client = bq_client()
-        dataset_ref = client.dataset(dataset)
-        tables = [table.table_id for table in client.list_tables(dataset_ref)]
-        return sorted(tables) if tables else ["No tables found"]
-    except Exception as e:
-        return [f"Error: {str(e)}"]
+# NOTE: On conserve le nom 'list_datasets' mais on branche sur la logique avancée.
+@mcp.tool(name="list_datasets")
+def list_datasets_tool() -> List[str]:
+    """List all available (or allowed) BigQuery datasets in the project"""
+    if ALLOWED_DATASETS:
+        return sorted(ALLOWED_DATASETS)
+    client = bq_client()
+    return sorted(ds.dataset_id for ds in client.list_datasets())
 
-@mcp.tool()
-def get_table_schema(dataset: str = "prod_public", table: str = "hospital") -> List[Dict[str, str]]:
-    """Get the schema of a BigQuery table (legacy version)"""
-    try:
-        if ALLOWED_DATASETS and dataset not in ALLOWED_DATASETS:
-            return [{"error": f"Dataset '{dataset}' is not allowed"}]
-        client = bq_client()
-        table_ref = client.dataset(dataset).table(table)
-        table_obj = client.get_table(table_ref)
-        schema = []
-        for field in table_obj.schema:
-            schema.append({
-                "name": field.name,
-                "type": field.field_type,
-                "mode": field.mode or "NULLABLE"
-            })
-        return schema
-    except Exception as e:
-        return [{"error": str(e)}]
 
+# Pour compat: on expose un param optionnel et un mode 'detailed' pour matcher les deux besoins
+@mcp.tool(name="list_tables")
+def list_tables_tool(dataset: str = DEFAULT_DATASET, detailed: bool = False) -> List[Union[str, Dict[str, str]]]:
+    """List tables in a BigQuery dataset. If detailed=True, returns [{'table_id','type'}]."""
+    _require_allowed(dataset)
+    client = bq_client()
+    ds_ref = bigquery.DatasetReference(client.project, dataset)
+    tables = list(client.list_tables(ds_ref))
+    if detailed:
+        return [{"table_id": t.table_id, "type": t.table_type} for t in tables]
+    return sorted([t.table_id for t in tables]) if tables else ["No tables found"]
+
+
+@mcp.tool(name="get_table_schema")
+def get_table_schema(dataset: str = DEFAULT_DATASET, table: str = "hospital") -> List[Dict[str, str]]:
+    """Get the schema of a BigQuery table (compat nom initial)."""
+    return get_schema(dataset=dataset, table=table)
+
+
+# Outils simples d'origine (gardés pour compat), mappés sur la table hôpitaux détectée
 @mcp.tool()
 def query_hospitals(limit: int = 10) -> List[Dict[str, Any]]:
-    """Query hospital data from BigQuery (legacy version)"""
+    """Query hospital data from BigQuery (columns courantes)."""
     try:
+        ds, tbl = _resolve_hospitals()
         client = bq_client()
+        table_ref = _qual_table(ds, tbl)
         query = f"""
-        SELECT hospital_id, hospital_name, city, primary_specialty, capacity_beds
-        FROM `{PROJECT_ID}.prod_public.hospital`
+        SELECT hospital_id, hospital_name, city,
+               primary_specialty, capacity_beds
+        FROM {table_ref}
         WHERE hospital_name IS NOT NULL
         ORDER BY hospital_name
-        LIMIT {limit}
+        LIMIT @lim
         """
-        results = client.query(query).result()
-        return [dict(row) for row in results]
+        job_cfg = QueryJobConfig(
+            default_dataset=bigquery.DatasetReference(client.project, ds),
+            maximum_bytes_billed=MAX_BYTES_BILLED,
+            query_parameters=[bigquery.ScalarQueryParameter("lim", "INT64", int(max(1, min(limit, MAX_ROWS))))],
+        )
+        results = client.query(query, job_config=job_cfg).result()
+        return [dict(row.items()) for row in results]
     except Exception as e:
         return [{"error": str(e)}]
+
 
 @mcp.tool()
 def search_hospitals_by_city(city: str, limit: int = 10) -> List[Dict[str, Any]]:
-    """Search hospitals by city name (legacy version)"""
+    """Simple search by city (compat). Préfère 'search_hospitals' pour plus d'options."""
     try:
-        client = bq_client()
-        query = f"""
-        SELECT hospital_id, hospital_name, city, primary_specialty, capacity_beds
-        FROM `{PROJECT_ID}.prod_public.hospital`
-        WHERE LOWER(city) LIKE LOWER('%{city}%')
-        ORDER BY hospital_name
-        LIMIT {limit}
-        """
-        results = client.query(query).result()
-        return [dict(row) for row in results]
+        return search_hospitals(city=city, limit=limit)
     except Exception as e:
         return [{"error": str(e)}]
 
-# ============= Tools Avancés =============
+
+# ======================================================================================
+# Tools avancés BigQuery (portés du second script)
+# ======================================================================================
 
 @mcp.tool(name="get_schema", description="Get column schema for a table.")
 def get_schema(dataset: str, table: str) -> List[Dict[str, str]]:
@@ -391,6 +335,7 @@ def get_schema(dataset: str, table: str) -> List[Dict[str, str]]:
     table_ref = bigquery.TableReference(bigquery.DatasetReference(client.project, dataset), table)
     tbl = client.get_table(table_ref)
     return [{"name": f.name, "type": f.field_type, "mode": f.mode} for f in tbl.schema]
+
 
 @mcp.tool(
     name="execute_query",
@@ -450,6 +395,47 @@ def execute_query(
     }
     return {"status": "ok", "rows": rows, "meta": meta}
 
+
+def _get_table_schema(dataset: str, table: str):
+    client = bq_client()
+    ref = bigquery.TableReference(bigquery.DatasetReference(client.project, dataset), table)
+    return client.get_table(ref).schema
+
+def _detect_specialties_shape(dataset: str, table: str) -> Tuple[Optional[str], str, Optional[str]]:
+    """
+    Retourne un triplet (spec_col, shape, leaf_field)
+    shape ∈ {"none","scalar_string","scalar_csv","array_string","array_record"}
+    leaf_field: pour array_record, le sous-champ string plausible (ex: "specialty","name","value","s"), sinon None.
+    """
+    schema = _get_table_schema(dataset, table)
+    fields = {f.name.lower(): f for f in schema}
+
+    if "specialties" not in fields:
+        return (None, "none", None)
+
+    f = fields["specialties"]
+    ftype = f.field_type.upper()
+    fmode = (f.mode or "NULLABLE").upper()
+
+    if ftype == "STRING" and fmode != "REPEATED":
+        return ("specialties", "scalar_csv", None)
+
+    if ftype == "STRING" and fmode == "REPEATED":
+        return ("specialties", "array_string", None)
+
+    if ftype == "RECORD" and fmode == "REPEATED" and getattr(f, "fields", None):
+        candidates = ["specialty", "name", "value", "label", "description", "s"]
+        leaf = None
+        for c in candidates:
+            sub = next((sf for sf in f.fields if sf.name.lower() == c and sf.field_type.upper() == "STRING"), None)
+            if sub:
+                leaf = sub.name
+                break
+        return ("specialties", "array_record", leaf)
+
+    return ("specialties", "scalar_string", None)
+
+
 @mcp.tool(
     name="list_specialties",
     description="List distinct hospital specialties (agrège primary_specialty + specialties sous toutes les formes)."
@@ -463,7 +449,7 @@ def list_specialties(
     try:
         ds, tbl = _resolve_hospitals(dataset, table)
     except Exception:
-        ds, tbl = (dataset or "prod_public"), (table or "hospital")
+        ds, tbl = (dataset or DEFAULT_DATASET), (table or HOSPITALS_TABLE)
 
     _require_allowed(ds)
     client = bq_client()
@@ -478,7 +464,6 @@ def list_specialties(
 
     parts: List[str] = []
 
-    # 1) primary_specialty (STRING simple)
     if has_primary:
         parts.append(
             f"""
@@ -489,10 +474,8 @@ def list_specialties(
             """
         )
 
-    # 2) specialties selon la forme détectée
     if spec_col and shape != "none":
         if shape in ("scalar_string", "scalar_csv"):
-            # STRING => CSV "a;b;c"
             parts.append(
                 f"""
                 SELECT TRIM(x) AS specialty
@@ -504,7 +487,6 @@ def list_specialties(
                 """
             )
         elif shape == "array_string":
-            # ARRAY<STRING>
             parts.append(
                 f"""
                 SELECT TRIM(CAST(x AS STRING)) AS specialty
@@ -515,7 +497,6 @@ def list_specialties(
             )
         elif shape == "array_record":
             if leaf:
-                # ARRAY<RECORD<leaf STRING>>
                 parts.append(
                     f"""
                     SELECT TRIM(CAST(x.{leaf} AS STRING)) AS specialty
@@ -525,7 +506,6 @@ def list_specialties(
                     """
                 )
             else:
-                # Fallback: serialize en JSON puis TRIM
                 parts.append(
                     f"""
                     SELECT TRIM(CAST(TO_JSON_STRING(x) AS STRING)) AS specialty
@@ -536,7 +516,6 @@ def list_specialties(
                 )
 
     if not parts:
-        # Rien à agréger
         return []
 
     union_sql = "\nUNION ALL\n".join(parts)
@@ -561,6 +540,7 @@ def list_specialties(
 
     rows = client.query(sql, job_config=job_cfg).result()
     return [r["specialty"] for r in rows]
+
 
 @mcp.tool(
     name="search_hospitals",
@@ -622,7 +602,6 @@ def search_hospitals(
             select_cols.append("email AS email")
 
     if not select_cols:
-        # garde-fou
         select_cols.append("hospital_id AS hospital_id")
         select_cols.append("hospital_name AS hospital_name")
 
@@ -639,12 +618,10 @@ def search_hospitals(
         params.append(bigquery.ScalarQueryParameter("namepat", "STRING", f"%{name_contains.lower()}%"))
 
     if specialty:
-        # match primary_specialty exact (case-insensitive)
         conds: List[str] = []
         if "primary_specialty" in fields:
             conds.append("LOWER(primary_specialty) = @spec")
         if "specialties" in fields:
-            # specialties est une STRING ; on split/trim et compare
             conds.append("EXISTS (SELECT 1 FROM UNNEST(SPLIT(specialties,';')) AS s WHERE LOWER(TRIM(s)) = @spec)")
         if conds:
             where.append("(" + " OR ".join(conds) + ")")
@@ -652,7 +629,6 @@ def search_hospitals(
 
     where_sql = "WHERE " + " AND ".join(where) if where else ""
 
-    # Tri priorisant la capacité puis le nom si dispo
     order_bits: List[str] = []
     if "capacity_beds" in fields:
         order_bits.append("capacity_beds DESC")
@@ -677,6 +653,7 @@ def search_hospitals(
     )
     rows = client.query(sql, job_config=job_cfg).result()
     return [dict(r.items()) for r in rows]
+
 
 @mcp.tool(
     name="get_hospital",
@@ -752,6 +729,7 @@ def get_hospital(
         return {"status": "not_found", "hospital_id": hospital_id}
     return {"status": "ok", "hospital": dict(row.items())}
 
+
 @mcp.tool(name="list_surgeon_subspecialties", description="List distinct surgeon sub-specialties.")
 def list_surgeon_subspecialties(
     limit: int = 3000,
@@ -763,7 +741,6 @@ def list_surgeon_subspecialties(
     client = bq_client()
     table_qual = _qual_table(ds, tbl)
 
-    # sub_specialty existe dans ton schéma sample
     sql = f"""
     SELECT DISTINCT sub_specialty
     FROM {table_qual}
@@ -778,6 +755,7 @@ def list_surgeon_subspecialties(
     )
     rows = client.query(sql, job_config=job_cfg).result()
     return [r["sub_specialty"] for r in rows]
+
 
 @mcp.tool(
     name="list_hospital_surgeons",
@@ -843,6 +821,7 @@ def list_hospital_surgeons(
     )
     rows = client.query(sql, job_config=job_cfg).result()
     return [dict(r.items()) for r in rows]
+
 
 @mcp.tool(
     name="search_surgeons",
@@ -946,6 +925,7 @@ def search_surgeons(
     rows = client.query(sql, job_config=job_cfg).result()
     return [dict(r.items()) for r in rows]
 
+
 @mcp.tool(
     name="get_surgeon",
     description="Get one surgeon by specialist_id. include_sensitive exposes email/phone/RPPS/licence if allowed.",
@@ -1008,12 +988,15 @@ def get_surgeon(
         return {"status": "not_found", "specialist_id": specialist_id}
     return {"status": "ok", "surgeon": dict(row.items())}
 
-# ============= Resources =============
+
+# ======================================================================================
+# Resources & Prompts (conservés du script principal)
+# ======================================================================================
 
 @mcp.resource("bq://datasets")
 def bq_datasets_resource() -> str:
     """Resource to list BigQuery datasets"""
-    datasets = list_datasets()
+    datasets = list_datasets_tool()
     return f"Available datasets: {', '.join(datasets)}"
 
 @mcp.resource("echo://static")
@@ -1025,11 +1008,14 @@ def echo_template(text: str) -> str:
     """Echo the input text"""
     return f"Echo: {text}"
 
-# ============= Prompts =============
-
 @mcp.prompt("echo")
 def echo_prompt(text: str) -> str:
     return text
+
+
+# ======================================================================================
+# Entrée serveur
+# ======================================================================================
 
 if __name__ == "__main__":
     mcp.run()
