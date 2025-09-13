@@ -2,13 +2,14 @@
 FastMCP Echo Server with Advanced BigQuery Integration (parametrized)
 - No dataset discovery: every tool takes explicit dataset/table parameters
 - Read-only & parameterized queries (no SELECT *)
-- Patient dossier summarization tool
+- Patient dossier summarization tool aligned to provided schemas
 """
 
 from __future__ import annotations
 
 import os
 import re
+from datetime import date, datetime
 from typing import Any, Dict, List, Optional, Tuple
 
 from fastmcp import FastMCP
@@ -24,11 +25,11 @@ from google.oauth2 import service_account
 PROJECT_ID = "mcp-hackathon-mistral"
 LOCATION = os.getenv("BQ_LOCATION", "EU")
 
-# Limites
+# Limits
 MAX_BYTES_BILLED = int(os.getenv("MAX_BYTES_BILLED", "200000000"))  # 200 MB
 MAX_ROWS = int(os.getenv("MAX_ROWS", "1000"))
 
-# Tables par défaut (EDITABLES ici ou via ENV)
+# Default tables (EDIT here or via ENV)
 DEFAULT_DATASET = "prod_public"
 
 HOSPITALS_DATASET = os.getenv("HOSPITALS_DATASET", DEFAULT_DATASET).strip()
@@ -49,7 +50,7 @@ CASES_TABLE = os.getenv("CASES_TABLE", "cases").strip()
 LABS_DATASET = os.getenv("LABS_DATASET", DEFAULT_DATASET).strip()
 LABS_TABLE = os.getenv("LABS_TABLE", "lab_results").strip()
 
-# (Optionnel) jeu de datasets explicitement autorisés (sinon tout est permis)
+# Optionally restrict usable datasets
 _ALLOWED = [d.strip() for d in os.getenv("ALLOWED_DATASETS", "").split(",") if d.strip()]
 ALLOWED_DATASETS = set(_ALLOWED) if _ALLOWED else set()
 
@@ -92,10 +93,10 @@ mcp = FastMCP(
         "  - list_hospital_surgeons(dataset, table, hospital_id, include_sensitive?, limit?)\n"
         "  - search_surgeons(dataset, table, hospital_id?, name_contains?, sub_specialty?, languages?, on_call?, accepts_new_patients?, include_sensitive?, limit?)\n"
         "  - get_surgeon(dataset, table, specialist_id, include_sensitive?)\n"
-        "  - get_patient(dataset, table, patient_id, include_sensitive?)\n"
-        "  - list_patient_cases(dataset, table, patient_id, limit?)\n"
-        "  - list_patient_lab_results(dataset, table, patient_id, limit?)\n"
-        "  - summarize_patient_dossier(patients_ds, patients_tb, cases_ds, cases_tb, labs_ds, labs_tb, patient_id, surgeons_ds?, surgeons_tb?, include_sensitive?)\n"
+        "  - get_patient(dataset, table, patient_id:str, include_sensitive?)\n"
+        "  - list_patient_cases(dataset, table, patient_id:str, limit?)\n"
+        "  - list_patient_lab_results(dataset, table, patient_id:str, limit?)\n"
+        "  - summarize_patient_dossier(patients_ds, patients_tb, cases_ds, cases_tb, labs_ds, labs_tb, patient_id:str, surgeons_ds?, surgeons_tb?, include_sensitive?)\n"
         "Notes:\n"
         "  • maximum_bytes_billed & row limits enforced.\n"
         "  • Optional ALLOWED_DATASETS restriction.\n"
@@ -168,10 +169,7 @@ def _col_exists(dataset: str, table: str, column: str) -> bool:
         return False
 
 def _select_available(dataset: str, table: str, pairs: List[Tuple[str, str]]) -> List[str]:
-    """
-    Build a SELECT list keeping only columns that exist.
-    pairs = [(column_name, alias), ...]
-    """
+    """Build a SELECT list keeping only columns that exist."""
     fields = _schema_fields(dataset, table)
     out = []
     for col, alias in pairs:
@@ -179,15 +177,23 @@ def _select_available(dataset: str, table: str, pairs: List[Tuple[str, str]]) ->
             out.append(f"{col} AS {alias}")
     return out
 
-def _first_existing(dataset: str, table: str, candidates: List[str]) -> Optional[str]:
+def _order_by_if_exists(dataset: str, table: str, candidates: List[str], desc: bool = True) -> str:
     for c in candidates:
         if _col_exists(dataset, table, c):
-            return c
-    return None
+            return f"ORDER BY {c} {'DESC' if desc else 'ASC'}"
+    return ""
 
-def _order_by_if_exists(dataset: str, table: str, candidates: List[str]) -> str:
-    col = _first_existing(dataset, table, candidates)
-    return f"ORDER BY {col} DESC" if col else ""
+def _safe_int(v: Any) -> Optional[int]:
+    try:
+        return int(v)
+    except Exception:
+        return None
+
+def _parse_iso_date(s: Optional[str]) -> Optional[date]:
+    try:
+        return date.fromisoformat(str(s))
+    except Exception:
+        return None
 
 
 # =============================================================================
@@ -267,7 +273,7 @@ def execute_query(
 
 @mcp.tool(
     name="list_specialties",
-    description="List distinct hospital specialties (primary_specialty + specialties CSV/arrays/records)."
+    description="List distinct hospital specialties from primary_specialty + specialties (CSV ';')."
 )
 def list_specialties(
     dataset: str = HOSPITALS_DATASET,
@@ -276,91 +282,24 @@ def list_specialties(
 ) -> List[str]:
     _require_allowed(dataset)
     client = bq_client()
-    table_qual = _qual_table(dataset, table)
-
-    # Inspect schema to detect shape for 'specialties'
-    fields = _schema_fields(dataset, table)
-    has_primary = "primary_specialty" in fields
-    parts: List[str] = []
-
-    # primary_specialty
-    if has_primary:
-        parts.append(
-            f"""
-            SELECT TRIM(CAST(primary_specialty AS STRING)) AS specialty
-            FROM {table_qual}
-            WHERE primary_specialty IS NOT NULL
-              AND LENGTH(TRIM(CAST(primary_specialty AS STRING))) > 0
-            """
-        )
-
-    # specialties (various shapes)
-    if "specialties" in fields:
-        f = fields["specialties"]
-        ftype = f.field_type.upper()
-        fmode = (f.mode or "NULLABLE").upper()
-
-        if ftype == "STRING" and fmode != "REPEATED":
-            parts.append(
-                f"""
-                SELECT TRIM(x) AS specialty
-                FROM {table_qual},
-                     UNNEST(SPLIT(CAST(specialties AS STRING), ';')) AS x
-                WHERE specialties IS NOT NULL
-                  AND LENGTH(TRIM(CAST(specialties AS STRING))) > 0
-                  AND LENGTH(TRIM(x)) > 0
-                """
-            )
-        elif ftype == "STRING" and fmode == "REPEATED":
-            parts.append(
-                f"""
-                SELECT TRIM(CAST(x AS STRING)) AS specialty
-                FROM {table_qual}, UNNEST(specialties) AS x
-                WHERE x IS NOT NULL
-                  AND LENGTH(TRIM(CAST(x AS STRING))) > 0
-                """
-            )
-        elif ftype == "RECORD" and fmode == "REPEATED":
-            # look for string-ish leaf
-            candidates = ["specialty", "name", "value", "label", "description", "s"]
-            leaf = None
-            for c in candidates:
-                sub = next((sf for sf in f.fields if sf.name.lower() == c and sf.field_type.upper() == "STRING"), None)
-                if sub:
-                    leaf = sub.name
-                    break
-            if leaf:
-                parts.append(
-                    f"""
-                    SELECT TRIM(CAST(x.{leaf} AS STRING)) AS specialty
-                    FROM {table_qual}, UNNEST(specialties) AS x
-                    WHERE x.{leaf} IS NOT NULL
-                      AND LENGTH(TRIM(CAST(x.{leaf} AS STRING))) > 0
-                    """
-                )
-            else:
-                parts.append(
-                    f"""
-                    SELECT TRIM(CAST(TO_JSON_STRING(x) AS STRING)) AS specialty
-                    FROM {table_qual}, UNNEST(specialties) AS x
-                    WHERE x IS NOT NULL
-                      AND LENGTH(TRIM(CAST(TO_JSON_STRING(x) AS STRING))) > 0
-                    """
-                )
-
-    if not parts:
-        return []
-
-    union_sql = "\nUNION ALL\n".join(parts)
+    t = _qual_table(dataset, table)
+    # Forme simple conforme à ton CSV
     sql = f"""
-    WITH U AS ({union_sql})
-    SELECT DISTINCT specialty
-    FROM U
-    WHERE specialty IS NOT NULL AND LENGTH(TRIM(specialty)) > 0
+    WITH u AS (
+      SELECT TRIM(CAST(primary_specialty AS STRING)) AS s
+      FROM {t}
+      WHERE primary_specialty IS NOT NULL AND LENGTH(TRIM(CAST(primary_specialty AS STRING)))>0
+      UNION ALL
+      SELECT TRIM(x) AS s
+      FROM {t}, UNNEST(SPLIT(CAST(specialties AS STRING), ';')) AS x
+      WHERE specialties IS NOT NULL AND LENGTH(TRIM(CAST(specialties AS STRING)))>0 AND LENGTH(TRIM(x))>0
+    )
+    SELECT DISTINCT s AS specialty
+    FROM u
+    WHERE s IS NOT NULL AND LENGTH(TRIM(s))>0
     ORDER BY specialty
     LIMIT @lim
     """
-
     job_cfg = QueryJobConfig(
         default_dataset=bigquery.DatasetReference(client.project, dataset),
         maximum_bytes_billed=MAX_BYTES_BILLED,
@@ -386,67 +325,59 @@ def search_hospitals(
     _require_allowed(dataset)
     client = bq_client()
     t = _qual_table(dataset, table)
-    fields = _schema_fields(dataset, table)
 
-    select_cols = _select_available(dataset, table, [
-        ("hospital_id", "hospital_id"),
-        ("hospital_code", "hospital_code"),
-        ("hospital_name", "hospital_name"),
-        ("legal_name", "legal_name"),
-        ("type", "type"),
-        ("ownership", "ownership"),
-        ("address", "address"),
-        ("postal_code", "postal_code"),
-        ("city", "city"),
-        ("department_code", "department_code"),
-        ("region", "region"),
-        ("country", "country"),
-        ("primary_specialty", "primary_specialty"),
-        ("specialties", "specialties"),
-        ("has_emergency", "has_emergency"),
-        ("er_level", "er_level"),
-        ("capacity_beds", "capacity_beds"),
-        ("icu_beds", "icu_beds"),
-        ("surgery_rooms", "surgery_rooms"),
-        ("accreditation", "accreditation"),
-        ("latitude", "latitude"),
-        ("longitude", "longitude"),
-        ("opening_hours", "opening_hours"),
-        ("active", "active"),
-        ("website", "website"),
-    ])
-
+    select_cols = [
+        "hospital_id AS hospital_id",
+        "hospital_code AS hospital_code",
+        "hospital_name AS hospital_name",
+        "legal_name AS legal_name",
+        "type AS type",
+        "ownership AS ownership",
+        "address AS address",
+        "postal_code AS postal_code",
+        "city AS city",
+        "department_code AS department_code",
+        "region AS region",
+        "country AS country",
+        "primary_specialty AS primary_specialty",
+        "specialties AS specialties",
+        "has_emergency AS has_emergency",
+        "er_level AS er_level",
+        "capacity_beds AS capacity_beds",
+        "icu_beds AS icu_beds",
+        "surgery_rooms AS surgery_rooms",
+        "accreditation AS accreditation",
+        "latitude AS latitude",
+        "longitude AS longitude",
+        "opening_hours AS opening_hours",
+        "active AS active",
+        "website AS website",
+    ]
     if include_contact and HOSPITALS_CONTACT_ALLOWED:
-        for col in ("contact_phone", "email"):
-            if _col_exists(dataset, table, col):
-                select_cols.append(f"{col} AS {col}")
-
-    if not select_cols:
-        select_cols = ["hospital_id AS hospital_id", "hospital_name AS hospital_name"]
+        select_cols += ["contact_phone AS contact_phone", "email AS email"]
 
     where: List[str] = []
     params: List[bigquery.ScalarQueryParameter] = []
 
-    if city and "city" in fields:
+    if city:
         where.append("city = @city")
         params.append(bigquery.ScalarQueryParameter("city", "STRING", city))
 
-    if name_contains and "hospital_name" in fields:
+    if name_contains:
         where.append("LOWER(hospital_name) LIKE @namepat")
         params.append(bigquery.ScalarQueryParameter("namepat", "STRING", f"%{name_contains.lower()}%"))
 
     if specialty:
-        conds: List[str] = []
-        if "primary_specialty" in fields:
-            conds.append("LOWER(primary_specialty) = @spec")
-        if "specialties" in fields:
-            conds.append("EXISTS (SELECT 1 FROM UNNEST(SPLIT(CAST(specialties AS STRING),';')) s WHERE LOWER(TRIM(s)) = @spec)")
-        if conds:
-            where.append("(" + " OR ".join(conds) + ")")
-            params.append(bigquery.ScalarQueryParameter("spec", "STRING", specialty.lower()))
+        where.append(
+            "("
+            "LOWER(primary_specialty) = @spec OR "
+            "EXISTS (SELECT 1 FROM UNNEST(SPLIT(CAST(specialties AS STRING), ';')) s WHERE LOWER(TRIM(s)) = @spec)"
+            ")"
+        )
+        params.append(bigquery.ScalarQueryParameter("spec", "STRING", specialty.lower()))
 
     where_sql = "WHERE " + " AND ".join(where) if where else ""
-    order_sql = _order_by_if_exists(dataset, table, ["capacity_beds", "hospital_name"])
+    order_sql = "ORDER BY capacity_beds DESC, hospital_name"
 
     lim = int(max(1, min(limit, MAX_ROWS)))
     sql = f"""
@@ -480,43 +411,36 @@ def get_hospital(
     _require_allowed(dataset)
     client = bq_client()
     t = _qual_table(dataset, table)
-    fields = _schema_fields(dataset, table)
 
-    select_cols = _select_available(dataset, table, [
-        ("hospital_id", "hospital_id"),
-        ("hospital_code", "hospital_code"),
-        ("hospital_name", "hospital_name"),
-        ("legal_name", "legal_name"),
-        ("type", "type"),
-        ("ownership", "ownership"),
-        ("address", "address"),
-        ("postal_code", "postal_code"),
-        ("city", "city"),
-        ("department_code", "department_code"),
-        ("region", "region"),
-        ("country", "country"),
-        ("primary_specialty", "primary_specialty"),
-        ("specialties", "specialties"),
-        ("has_emergency", "has_emergency"),
-        ("er_level", "er_level"),
-        ("capacity_beds", "capacity_beds"),
-        ("icu_beds", "icu_beds"),
-        ("surgery_rooms", "surgery_rooms"),
-        ("accreditation", "accreditation"),
-        ("latitude", "latitude"),
-        ("longitude", "longitude"),
-        ("opening_hours", "opening_hours"),
-        ("active", "active"),
-        ("website", "website"),
-    ])
-
+    select_cols = [
+        "hospital_id AS hospital_id",
+        "hospital_code AS hospital_code",
+        "hospital_name AS hospital_name",
+        "legal_name AS legal_name",
+        "type AS type",
+        "ownership AS ownership",
+        "address AS address",
+        "postal_code AS postal_code",
+        "city AS city",
+        "department_code AS department_code",
+        "region AS region",
+        "country AS country",
+        "primary_specialty AS primary_specialty",
+        "specialties AS specialties",
+        "has_emergency AS has_emergency",
+        "er_level AS er_level",
+        "capacity_beds AS capacity_beds",
+        "icu_beds AS icu_beds",
+        "surgery_rooms AS surgery_rooms",
+        "accreditation AS accreditation",
+        "latitude AS latitude",
+        "longitude AS longitude",
+        "opening_hours AS opening_hours",
+        "active AS active",
+        "website AS website",
+    ]
     if include_contact and HOSPITALS_CONTACT_ALLOWED:
-        for col in ("contact_phone", "email"):
-            if _col_exists(dataset, table, col):
-                select_cols.append(f"{col} AS {col}")
-
-    if not select_cols:
-        select_cols = ["hospital_id AS hospital_id", "hospital_name AS hospital_name"]
+        select_cols += ["contact_phone AS contact_phone", "email AS email"]
 
     sql = f"""
     SELECT {", ".join(select_cols)}
@@ -566,7 +490,7 @@ def list_surgeon_subspecialties(
 
 @mcp.tool(
     name="list_hospital_surgeons",
-    description="List surgeons working at a given hospital_id. include_sensitive exposes email/phone/RPPS/licence if allowed."
+    description="List surgeons for a given hospital_id. Sensitive fields gated by env flag."
 )
 def list_hospital_surgeons(
     dataset: str = SURGEONS_DATASET,
@@ -578,32 +502,30 @@ def list_hospital_surgeons(
     _require_allowed(dataset)
     client = bq_client()
     t = _qual_table(dataset, table)
-    fields = _schema_fields(dataset, table)
 
-    select_cols = _select_available(dataset, table, [
-        ("specialist_id", "specialist_id"),
-        ("hospital_id", "hospital_id"),
-        ("department", "department"),
-        ("sub_specialty", "sub_specialty"),
-        ("first_name", "first_name"),
-        ("last_name", "last_name"),
-        ("years_experience", "years_experience"),
-        ("languages", "languages"),
-        ("on_call", "on_call"),
-        ("accepts_new_patients", "accepts_new_patients"),
-        ("consultation_fee_eur", "consultation_fee_eur"),
-        ("surgery_methods", "surgery_methods"),
-        ("weekly_schedule", "weekly_schedule"),
-        ("rating", "rating"),
-    ])
-
-    if include_sensitive and SURGEONS_SENSITIVE_ALLOWED:
-        for col in ("email", "phone", "rpps_number", "license_number"):
-            if _col_exists(dataset, table, col):
-                select_cols.append(f"{col} AS {col}")
-
-    if not select_cols:
-        select_cols = ["specialist_id AS specialist_id", "hospital_id AS hospital_id"]
+    base = [
+        "specialist_id AS specialist_id",
+        "hospital_id AS hospital_id",
+        "department AS department",
+        "sub_specialty AS sub_specialty",
+        "first_name AS first_name",
+        "last_name AS last_name",
+        "years_experience AS years_experience",
+        "languages AS languages",
+        "on_call AS on_call",
+        "accepts_new_patients AS accepts_new_patients",
+        "consultation_fee_eur AS consultation_fee_eur",
+        "surgery_methods AS surgery_methods",
+        "weekly_schedule AS weekly_schedule",
+        "rating AS rating",
+    ]
+    sens = [
+        "email AS email",
+        "phone AS phone",
+        "rpps_number AS rpps_number",
+        "license_number AS license_number",
+    ]
+    select_cols = base + (sens if include_sensitive and SURGEONS_SENSITIVE_ALLOWED else [])
 
     sql = f"""
     SELECT {", ".join(select_cols)}
@@ -626,8 +548,8 @@ def list_hospital_surgeons(
 
 @mcp.tool(
     name="search_surgeons",
-    description="Search surgeons with optional filters. Filters: hospital_id, name_contains, sub_specialty, languages (CSV; any), on_call, accepts_new_patients. Sensitive fields gated."
-)
+    description=("Search surgeons with optional filters. "
+                 "Filters: hospital_id, name_contains, sub_specialty, languages (CSV; any), on_call, accepts_new_patients."))
 def search_surgeons(
     dataset: str = SURGEONS_DATASET,
     table: str = SURGEONS_TABLE,
@@ -643,59 +565,57 @@ def search_surgeons(
     _require_allowed(dataset)
     client = bq_client()
     t = _qual_table(dataset, table)
-    fields = _schema_fields(dataset, table)
 
-    select_cols = _select_available(dataset, table, [
-        ("specialist_id", "specialist_id"),
-        ("hospital_id", "hospital_id"),
-        ("department", "department"),
-        ("sub_specialty", "sub_specialty"),
-        ("first_name", "first_name"),
-        ("last_name", "last_name"),
-        ("years_experience", "years_experience"),
-        ("languages", "languages"),
-        ("on_call", "on_call"),
-        ("accepts_new_patients", "accepts_new_patients"),
-        ("consultation_fee_eur", "consultation_fee_eur"),
-        ("surgery_methods", "surgery_methods"),
-        ("weekly_schedule", "weekly_schedule"),
-        ("rating", "rating"),
-    ])
-
-    if include_sensitive and SURGEONS_SENSITIVE_ALLOWED:
-        for col in ("email", "phone", "rpps_number", "license_number"):
-            if _col_exists(dataset, table, col):
-                select_cols.append(f"{col} AS {col}")
-
-    if not select_cols:
-        select_cols = ["specialist_id AS specialist_id", "hospital_id AS hospital_id"]
+    base = [
+        "specialist_id AS specialist_id",
+        "hospital_id AS hospital_id",
+        "department AS department",
+        "sub_specialty AS sub_specialty",
+        "first_name AS first_name",
+        "last_name AS last_name",
+        "years_experience AS years_experience",
+        "languages AS languages",
+        "on_call AS on_call",
+        "accepts_new_patients AS accepts_new_patients",
+        "consultation_fee_eur AS consultation_fee_eur",
+        "surgery_methods AS surgery_methods",
+        "weekly_schedule AS weekly_schedule",
+        "rating AS rating",
+    ]
+    sens = [
+        "email AS email",
+        "phone AS phone",
+        "rpps_number AS rpps_number",
+        "license_number AS license_number",
+    ]
+    select_cols = base + (sens if include_sensitive and SURGEONS_SENSITIVE_ALLOWED else [])
 
     where: List[str] = []
     params: List[bigquery.ScalarQueryParameter] = []
 
-    if hospital_id is not None and "hospital_id" in fields:
+    if hospital_id is not None:
         where.append("hospital_id = @hid")
         params.append(bigquery.ScalarQueryParameter("hid", "INT64", int(hospital_id)))
 
-    if name_contains and ("first_name" in fields and "last_name" in fields):
+    if name_contains:
         where.append("(LOWER(first_name) LIKE @namepat OR LOWER(last_name) LIKE @namepat)")
         params.append(bigquery.ScalarQueryParameter("namepat", "STRING", f"%{name_contains.lower()}%"))
 
-    if sub_specialty and "sub_specialty" in fields:
+    if sub_specialty:
         where.append("LOWER(sub_specialty) = @sub")
         params.append(bigquery.ScalarQueryParameter("sub", "STRING", sub_specialty.lower()))
 
-    if languages and "languages" in fields:
+    if languages:
         langs = [x.strip().lower() for x in languages.replace(",", ";").split(";") if x.strip()]
         for i, lg in enumerate(langs):
             where.append(f"REGEXP_CONTAINS(LOWER(languages), @lg{i})")
             params.append(bigquery.ScalarQueryParameter(f"lg{i}", "STRING", fr"(^|;)\s*{re.escape(lg)}\s*(;|$)"))
 
-    if on_call is not None and "on_call" in fields:
+    if on_call is not None:
         where.append("on_call = @onc")
         params.append(bigquery.ScalarQueryParameter("onc", "BOOL", bool(on_call)))
 
-    if accepts_new_patients is not None and "accepts_new_patients" in fields:
+    if accepts_new_patients is not None:
         where.append("accepts_new_patients = @anp")
         params.append(bigquery.ScalarQueryParameter("anp", "BOOL", bool(accepts_new_patients)))
 
@@ -731,31 +651,30 @@ def get_surgeon(
     _require_allowed(dataset)
     client = bq_client()
     t = _qual_table(dataset, table)
-    fields = _schema_fields(dataset, table)
 
-    select_cols = _select_available(dataset, table, [
-        ("specialist_id", "specialist_id"),
-        ("hospital_id", "hospital_id"),
-        ("department", "department"),
-        ("sub_specialty", "sub_specialty"),
-        ("first_name", "first_name"),
-        ("last_name", "last_name"),
-        ("years_experience", "years_experience"),
-        ("languages", "languages"),
-        ("on_call", "on_call"),
-        ("accepts_new_patients", "accepts_new_patients"),
-        ("consultation_fee_eur", "consultation_fee_eur"),
-        ("surgery_methods", "surgery_methods"),
-        ("weekly_schedule", "weekly_schedule"),
-        ("rating", "rating"),
-    ])
-    if include_sensitive and SURGEONS_SENSITIVE_ALLOWED:
-        for col in ("email", "phone", "rpps_number", "license_number"):
-            if _col_exists(dataset, table, col):
-                select_cols.append(f"{col} AS {col}")
-
-    if not select_cols:
-        select_cols = ["specialist_id AS specialist_id", "hospital_id AS hospital_id"]
+    base = [
+        "specialist_id AS specialist_id",
+        "hospital_id AS hospital_id",
+        "department AS department",
+        "sub_specialty AS sub_specialty",
+        "first_name AS first_name",
+        "last_name AS last_name",
+        "years_experience AS years_experience",
+        "languages AS languages",
+        "on_call AS on_call",
+        "accepts_new_patients AS accepts_new_patients",
+        "consultation_fee_eur AS consultation_fee_eur",
+        "surgery_methods AS surgery_methods",
+        "weekly_schedule AS weekly_schedule",
+        "rating AS rating",
+    ]
+    sens = [
+        "email AS email",
+        "phone AS phone",
+        "rpps_number AS rpps_number",
+        "license_number AS license_number",
+    ]
+    select_cols = base + (sens if include_sensitive and SURGEONS_SENSITIVE_ALLOWED else [])
 
     sql = f"""
     SELECT {", ".join(select_cols)}
@@ -779,49 +698,28 @@ def get_surgeon(
 # Patients + Cases + Labs
 # =============================================================================
 
-@mcp.tool(name="get_patient", description="Get one patient by patient_id. Sensitive columns (email/phone/address/insurance/ssn) gated.")
+@mcp.tool(name="get_patient", description="Get one patient by patient_id (STRING). Sensitive columns gated.")
 def get_patient(
     dataset: str = PATIENTS_DATASET,
     table: str = PATIENTS_TABLE,
-    patient_id: int = 0,
+    patient_id: str = "",
     include_sensitive: bool = False,
 ) -> Dict[str, Any]:
     _require_allowed(dataset)
     client = bq_client()
     t = _qual_table(dataset, table)
-    fields = _schema_fields(dataset, table)
 
-    base_pairs = [
-        ("patient_id", "patient_id"),
-        ("first_name", "first_name"),
-        ("last_name", "last_name"),
-        ("full_name", "full_name"),
-        ("dob", "dob"),
-        ("date_of_birth", "date_of_birth"),
-        ("gender", "gender"),
-        ("sex", "sex"),
-        ("blood_type", "blood_type"),
-        ("primary_physician_id", "primary_physician_id"),
-        ("primary_hospital_id", "primary_hospital_id"),
-        ("allergies", "allergies"),
-        ("chronic_conditions", "chronic_conditions"),
-        ("medications", "medications"),
-        ("height_cm", "height_cm"),
-        ("weight_kg", "weight_kg"),
-        ("bmi", "bmi"),
-        ("last_visit_at", "last_visit_at"),
-        ("created_at", "created_at"),
-        ("updated_at", "updated_at"),
+    base = [
+        "patient_id AS patient_id",
+        "first_name AS first_name",
+        "last_name AS last_name",
+        "dob AS dob",
+        "sex AS sex",
+        "city AS city",
+        "postal_code AS postal_code",
     ]
-    select_cols = _select_available(dataset, table, base_pairs)
-
-    if include_sensitive and PATIENTS_SENSITIVE_ALLOWED:
-        for col in ("email", "phone", "address", "city", "postal_code", "insurance_id", "ssn"):
-            if _col_exists(dataset, table, col):
-                select_cols.append(f"{col} AS {col}")
-
-    if not select_cols:
-        select_cols = ["patient_id AS patient_id"]
+    sens = ["email AS email", "phone AS phone", "address AS address", "insurance_id AS insurance_id"]
+    select_cols = base + (sens if include_sensitive and PATIENTS_SENSITIVE_ALLOWED else [])
 
     sql = f"""
     SELECT {", ".join(select_cols)}
@@ -832,54 +730,45 @@ def get_patient(
     job_cfg = QueryJobConfig(
         default_dataset=bigquery.DatasetReference(client.project, dataset),
         maximum_bytes_billed=MAX_BYTES_BILLED,
-        query_parameters=[bigquery.ScalarQueryParameter("pid", "INT64", int(patient_id))],
+        query_parameters=[bigquery.ScalarQueryParameter("pid", "STRING", str(patient_id))],
     )
     it = client.query(sql, job_config=job_cfg).result()
     row = next(iter(it), None)
     if not row:
         return {"status": "not_found", "patient_id": patient_id}
-    return {"status": "ok", "patient": dict(row.items())}
+    p = dict(row.items())
 
-@mcp.tool(name="list_patient_cases", description="List cases for a patient_id (most recent first).")
+    # derive age
+    dob = _parse_iso_date(p.get("dob"))
+    if dob:
+        today = date.today()
+        age = today.year - dob.year - ((today.month, today.day) < (dob.month, dob.day))
+        p["age_years"] = age
+    return {"status": "ok", "patient": p}
+
+@mcp.tool(name="list_patient_cases", description="List cases for a patient_id (STRING), most recent first.")
 def list_patient_cases(
     dataset: str = CASES_DATASET,
     table: str = CASES_TABLE,
-    patient_id: int = 0,
+    patient_id: str = "",
     limit: int = 100,
 ) -> List[Dict[str, Any]]:
     _require_allowed(dataset)
     client = bq_client()
     t = _qual_table(dataset, table)
-    fields = _schema_fields(dataset, table)
 
-    if "patient_id" not in fields:
-        raise ValueError(f"Table {dataset}.{table} does not contain 'patient_id'")
-
-    pairs = [
-        ("case_id", "case_id"),
-        ("patient_id", "patient_id"),
-        ("diagnosis", "diagnosis"),
-        ("diagnosis_code", "diagnosis_code"),
-        ("status", "status"),
-        ("admission_date", "admission_date"),
-        ("discharge_date", "discharge_date"),
-        ("admission_at", "admission_at"),
-        ("discharge_at", "discharge_at"),
-        ("treating_surgeon_id", "treating_surgeon_id"),
-        ("hospital_id", "hospital_id"),
-        ("procedure_code", "procedure_code"),
-        ("procedure_name", "procedure_name"),
-        ("priority", "priority"),
-        ("notes", "notes"),
-        ("created_at", "created_at"),
-        ("updated_at", "updated_at"),
+    select_cols = [
+        "case_id AS case_id",
+        "patient_id AS patient_id",
+        "diagnosis_code AS diagnosis_code",
+        "diagnosis_desc AS diagnosis_desc",
+        "severity AS severity",
+        "admitted_at AS admitted_at",
+        "discharged_at AS discharged_at",
+        "attending_physician AS attending_physician",
+        "status AS status",
     ]
-    select_cols = _select_available(dataset, table, pairs)
-    if not select_cols:
-        select_cols = ["case_id AS case_id", "patient_id AS patient_id"]
-
-    # Try to pick a good ordering column
-    order_sql = _order_by_if_exists(dataset, table, ["updated_at", "admission_at", "admission_date", "created_at"])
+    order_sql = "ORDER BY admitted_at DESC"
 
     sql = f"""
     SELECT {", ".join(select_cols)}
@@ -889,7 +778,7 @@ def list_patient_cases(
     LIMIT @lim
     """
     params = [
-        bigquery.ScalarQueryParameter("pid", "INT64", int(patient_id)),
+        bigquery.ScalarQueryParameter("pid", "STRING", str(patient_id)),
         bigquery.ScalarQueryParameter("lim", "INT64", int(max(1, min(limit, MAX_ROWS)))),
     ]
     job_cfg = QueryJobConfig(
@@ -898,49 +787,38 @@ def list_patient_cases(
         query_parameters=params,
     )
     rows = client.query(sql, job_config=job_cfg).result()
-    return [dict(r.items()) for r in rows]
+    out = [dict(r.items()) for r in rows]
+    # compute LOS (length of stay) if dates present
+    for c in out:
+        ad = _parse_iso_date(c.get("admitted_at"))
+        dd = _parse_iso_date(c.get("discharged_at"))
+        if ad and dd:
+            c["los_days"] = max(0, (dd - ad).days)
+    return out
 
-@mcp.tool(name="list_patient_lab_results", description="List lab results for a patient_id (most recent first).")
+@mcp.tool(name="list_patient_lab_results", description="List lab results for a patient_id (STRING), most recent first.")
 def list_patient_lab_results(
     dataset: str = LABS_DATASET,
     table: str = LABS_TABLE,
-    patient_id: int = 0,
+    patient_id: str = "",
     limit: int = 100,
 ) -> List[Dict[str, Any]]:
     _require_allowed(dataset)
     client = bq_client()
     t = _qual_table(dataset, table)
-    fields = _schema_fields(dataset, table)
 
-    if "patient_id" not in fields:
-        raise ValueError(f"Table {dataset}.{table} does not contain 'patient_id'")
-
-    pairs = [
-        ("lab_result_id", "lab_result_id"),
-        ("patient_id", "patient_id"),
-        ("test_code", "test_code"),
-        ("test_name", "test_name"),
-        ("result_value", "result_value"),
-        ("units", "units"),
-        ("reference_range", "reference_range"),
-        ("flag", "flag"),
-        ("result_flag", "result_flag"),
-        ("is_abnormal", "is_abnormal"),
-        ("status", "status"),
-        ("collected_at", "collected_at"),
-        ("reported_at", "reported_at"),
-        ("ordered_by_id", "ordered_by_id"),
-        ("accession_number", "accession_number"),
-        ("notes", "notes"),
-        ("created_at", "created_at"),
-        ("updated_at", "updated_at"),
+    select_cols = [
+        "lab_id AS lab_id",
+        "patient_id AS patient_id",
+        "case_id AS case_id",
+        "test_date AS test_date",
+        "test_name AS test_name",
+        "value AS value",
+        "unit AS unit",
+        "ref_range AS ref_range",
+        "flag AS flag",
     ]
-    select_cols = _select_available(dataset, table, pairs)
-    if not select_cols:
-        select_cols = ["lab_result_id AS lab_result_id", "patient_id AS patient_id"]
-
-    # Order by best available timestamp
-    order_sql = _order_by_if_exists(dataset, table, ["reported_at", "collected_at", "updated_at", "created_at"])
+    order_sql = "ORDER BY test_date DESC"
 
     sql = f"""
     SELECT {", ".join(select_cols)}
@@ -950,7 +828,7 @@ def list_patient_lab_results(
     LIMIT @lim
     """
     params = [
-        bigquery.ScalarQueryParameter("pid", "INT64", int(patient_id)),
+        bigquery.ScalarQueryParameter("pid", "STRING", str(patient_id)),
         bigquery.ScalarQueryParameter("lim", "INT64", int(max(1, min(limit, MAX_ROWS)))),
     ]
     job_cfg = QueryJobConfig(
@@ -968,10 +846,8 @@ def list_patient_lab_results(
 
 @mcp.tool(
     name="summarize_patient_dossier",
-    description=(
-        "Return a compact summary for a patient: demographics, counts, latest case, recent labs. "
-        "Pass explicit tables. Optionally enrich latest case with surgeon info."
-    ),
+    description=("Compact summary for a patient (STRING id): demographics, age, case counts, latest case (LOS), "
+                 "recent labs & abnormal flags. Optionally resolve attending surgeon by name.")
 )
 def summarize_patient_dossier(
     patients_dataset: str = PATIENTS_DATASET,
@@ -980,76 +856,79 @@ def summarize_patient_dossier(
     cases_table: str = CASES_TABLE,
     labs_dataset: str = LABS_DATASET,
     labs_table: str = LABS_TABLE,
-    patient_id: int = 0,
+    patient_id: str = "",
     include_sensitive: bool = False,
     surgeons_dataset: Optional[str] = SURGEONS_DATASET,
     surgeons_table: Optional[str] = SURGEONS_TABLE,
     labs_limit: int = 10,
 ) -> Dict[str, Any]:
-    # Basic patient
+    # Patient
     p = get_patient(dataset=patients_dataset, table=patients_table, patient_id=patient_id, include_sensitive=include_sensitive)
     if p.get("status") == "not_found":
         return {"status": "not_found", "patient_id": patient_id}
+    patient = p["patient"]
 
-    # Cases (limit small, but we also compute counts)
-    all_cases = list_patient_cases(dataset=cases_dataset, table=cases_table, patient_id=patient_id, limit=min(100, MAX_ROWS))
-    # Count totals and open cases
-    total_cases = len(all_cases)
-    open_cases = sum(1 for c in all_cases if str(c.get("status", "")).lower() in {"open", "active", "ongoing", "scheduled"})
+    # Cases
+    cases = list_patient_cases(dataset=cases_dataset, table=cases_table, patient_id=patient_id, limit=min(200, MAX_ROWS))
+    total_cases = len(cases)
+    open_cases = sum(1 for c in cases if str(c.get("status", "")).lower() in {"open", "active", "ongoing", "scheduled"})
+    latest_case = cases[0] if cases else None
 
-    # Latest case by best date column
-    latest_case = None
-    if all_cases:
-        # choose best timestamp key
-        def key_case(c: Dict[str, Any]) -> Tuple:
-            for k in ["updated_at", "admission_at", "admission_date", "created_at"]:
-                if c.get(k):
-                    return (c.get(k),)
-            return (None,)
-        latest_case = sorted(all_cases, key=key_case, reverse=True)[0]
+    # Labs
+    labs = list_patient_lab_results(dataset=labs_dataset, table=labs_table, patient_id=patient_id, limit=min(labs_limit, MAX_ROWS))
+    def is_abnormal(x: Dict[str, Any]) -> bool:
+        v = str(x.get("flag", "")).strip().lower()
+        return v not in {"", "normal", "n", "ok"}
+    abnormal_labs = [l for l in labs if is_abnormal(l)]
+    last_lab_date = labs[0]["test_date"] if labs else None
 
-    # Recent labs (try to detect “abnormal” if possible)
-    recent_labs = list_patient_lab_results(dataset=labs_dataset, table=labs_table, patient_id=patient_id, limit=min(labs_limit, MAX_ROWS))
-    # Try to slice abnormal subset if flags exist
-    def lab_is_abnormal(l: Dict[str, Any]) -> bool:
-        val = str(l.get("flag", "") or l.get("result_flag", "")).lower()
-        if val in {"h", "l", "high", "low", "abnormal"}:
-            return True
-        if isinstance(l.get("is_abnormal"), bool):
-            return bool(l["is_abnormal"])
-        return False
-    abnormal_labs = [l for l in recent_labs if lab_is_abnormal(l)][:5]
-
-    # Optional enrichment: map treating_surgeon_id -> surgeon details
+    # Optional surgeon resolution from attending_physician "First Last"
     surgeon_detail = None
-    if latest_case and latest_case.get("treating_surgeon_id") and surgeons_dataset and surgeons_table:
+    if latest_case and latest_case.get("attending_physician") and surgeons_dataset and surgeons_table:
         try:
-            s = get_surgeon(
-                dataset=surgeons_dataset,
-                table=surgeons_table,
-                specialist_id=int(latest_case["treating_surgeon_id"]),
-                include_sensitive=False,
-            )
-            if s.get("status") == "ok":
-                surgeon_detail = s["surgeon"]
+            full = str(latest_case["attending_physician"]).strip()
+            parts = [p for p in full.replace("  ", " ").split(" ") if p]
+            if len(parts) >= 2:
+                fn, ln = parts[0], parts[-1]
+                client = bq_client()
+                t = _qual_table(surgeons_dataset, surgeons_table)
+                sql = f"""
+                SELECT specialist_id, hospital_id, first_name, last_name, sub_specialty, years_experience, rating
+                FROM {t}
+                WHERE LOWER(first_name) = @fn AND LOWER(last_name) = @ln
+                ORDER BY rating DESC, years_experience DESC
+                LIMIT 1
+                """
+                cfg = QueryJobConfig(
+                    default_dataset=bigquery.DatasetReference(client.project, surgeons_dataset),
+                    maximum_bytes_billed=MAX_BYTES_BILLED,
+                    query_parameters=[
+                        bigquery.ScalarQueryParameter("fn", "STRING", fn.lower()),
+                        bigquery.ScalarQueryParameter("ln", "STRING", ln.lower()),
+                    ],
+                )
+                it = client.query(sql, job_config=cfg).result()
+                one = next(iter(it), None)
+                surgeon_detail = dict(one.items()) if one else None
         except Exception:
             surgeon_detail = None
 
     overview = {
         "total_cases": total_cases,
         "open_cases": open_cases,
-        "total_lab_results": len(recent_labs),
+        "total_lab_results": len(labs),
         "abnormal_lab_count": len(abnormal_labs),
+        "last_lab_date": last_lab_date,
     }
 
     return {
         "status": "ok",
-        "patient": p.get("patient"),
+        "patient": patient,
         "overview": overview,
         "latest_case": latest_case,
-        "latest_case_surgeon": surgeon_detail,
-        "recent_labs": recent_labs[:labs_limit],
-        "recent_abnormal_labs": abnormal_labs,
+        "attending_surgeon_match": surgeon_detail,
+        "recent_labs": labs,
+        "recent_abnormal_labs": abnormal_labs[:5],
     }
 
 
