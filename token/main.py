@@ -1,6 +1,7 @@
 from fastmcp import FastMCP
 from fastmcp.server.auth.providers.jwt import StaticTokenVerifier
 
+#FIX ID SESSION
 # Define development tokens and their associated claims
 verifier = StaticTokenVerifier(
     tokens={

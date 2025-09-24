@@ -874,7 +874,6 @@ def summarize_patient_dossier(
     open_cases = sum(1 for c in cases if str(c.get("status", "")).lower() in {"open", "active", "ongoing", "scheduled"})
     latest_case = cases[0] if cases else None
 
-    # Labs
     labs = list_patient_lab_results(dataset=labs_dataset, table=labs_table, patient_id=patient_id, limit=min(labs_limit, MAX_ROWS))
     def is_abnormal(x: Dict[str, Any]) -> bool:
         v = str(x.get("flag", "")).strip().lower()
@@ -882,7 +881,6 @@ def summarize_patient_dossier(
     abnormal_labs = [l for l in labs if is_abnormal(l)]
     last_lab_date = labs[0]["test_date"] if labs else None
 
-    # Optional surgeon resolution from attending_physician "First Last"
     surgeon_detail = None
     if latest_case and latest_case.get("attending_physician") and surgeons_dataset and surgeons_table:
         try:
@@ -930,11 +928,6 @@ def summarize_patient_dossier(
         "recent_labs": labs,
         "recent_abnormal_labs": abnormal_labs[:5],
     }
-
-
-# =============================================================================
-# Run
-# =============================================================================
 
 if __name__ == "__main__":
     mcp.run()
